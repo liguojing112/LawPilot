@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { Layout, Menu, Typography, message, Button, Tooltip } from 'antd'
 import type { MenuProps } from 'antd'
+import type { ReactNode } from 'react'
+type MenuItem = NonNullable<MenuProps['items']>[number]
 import {
   HomeOutlined,
   FileTextOutlined,
@@ -11,8 +13,10 @@ import {
   SettingOutlined,
   QuestionCircleOutlined,
   GlobalOutlined,
+  RobotOutlined,
 } from '@ant-design/icons'
 import { HelpDrawer } from '../components/HelpDrawer'
+import { AiPanel } from '../components/AiPanel'
 
 const { Header, Content } = Layout
 const { Text } = Typography
@@ -30,7 +34,7 @@ const MENU_I18N: Record<string, { zh: string; en: string }> = {
 
 type Lang = 'zh' | 'en'
 
-const menuItems: MenuItem[] = [
+const menuItems: { key: string; icon: ReactNode }[] = [
   { key: '/', icon: <HomeOutlined /> },
   { key: '/laws', icon: <FileTextOutlined /> },
   { key: '/cases', icon: <FolderOpenOutlined /> },
@@ -41,6 +45,7 @@ const menuItems: MenuItem[] = [
 
 export function MainLayout() {
   const [helpOpen, setHelpOpen] = useState(false)
+  const [aiOpen, setAiOpen] = useState(false)
   const [lang, setLang] = useState<Lang>('zh')
   const navigate = useNavigate()
   const location = useLocation()
@@ -88,7 +93,7 @@ export function MainLayout() {
 
       if ((e.ctrlKey || e.metaKey) && e.key === 'j') {
         e.preventDefault()
-        message.info(lang === 'zh' ? 'AI 对话面板将在后续版本完善' : 'AI Chat Panel coming soon')
+        setAiOpen((prev) => !prev)
       }
     }
     window.addEventListener('keydown', handleKeydown)
@@ -134,6 +139,16 @@ export function MainLayout() {
 
         {/* 右侧工具按钮 */}
         <div className="flex items-center gap-1 flex-shrink-0">
+          <Tooltip title={lang === 'zh' ? 'AI 对话 (Ctrl+J)' : 'AI Chat (Ctrl+J)'}>
+            <Button
+              type="text"
+              size="small"
+              icon={<RobotOutlined />}
+              onClick={() => setAiOpen(true)}
+              className={aiOpen ? 'text-blue-500' : 'text-gray-500 hover:text-blue-500'}
+            />
+          </Tooltip>
+
           <Tooltip title={lang === 'zh' ? 'Switch to English' : '切换到中文'}>
             <Button
               type="text"
@@ -163,6 +178,7 @@ export function MainLayout() {
       </Layout>
 
       <HelpDrawer open={helpOpen} onClose={() => setHelpOpen(false)} />
+      <AiPanel open={aiOpen} onClose={() => setAiOpen(false)} />
     </Layout>
   )
 }

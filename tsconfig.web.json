@@ -12,10 +12,9 @@
     "jsx": "react-jsx",
     "outDir": "./out/renderer",
     "rootDir": ".",
-    "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"],
-      "@shared/*": ["shared/*"]
+      "@/*": ["./src/*"],
+      "@shared/*": ["./shared/*"]
     }
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "shared/**/*.ts", "electron/preload/**/*.ts"]

@@ -168,9 +168,9 @@ export function registerMaterialIpc(): void {
           'material_linked',
           `关联了材料"${material.original_name}"${c ? `到案件"${c.title}"` : ''}`
         )
-      } else if (material && !caseId) {
+      } else if (material && !caseId && material.case_id) {
         createActivity(
-          material.case_id || '',
+          material.case_id,
           'material_unlinked',
           `取消关联材料"${material.original_name}"`
         )
@@ -202,7 +202,15 @@ export function registerMaterialIpc(): void {
       if (!material || !material.raw_text) {
         return { category: '其他', confidence: 0 }
       }
+      const prevCategory = material.category
       const category = autoClassifyText(materialId, material.raw_text)
+      if (material.case_id && category.category !== prevCategory) {
+        createActivity(
+          material.case_id,
+          'material_classified',
+          `材料"${material.original_name}"分类更新为「${category.category}」（置信度 ${Math.round(category.confidence * 100)}%）`
+        )
+      }
       return category
     }
   )
@@ -228,6 +236,7 @@ export function registerMaterialIpc(): void {
     IPC_CHANNELS.MATERIAL_UPDATE_ORDER,
     (_event, caseId: string, orderedIds: string[]) => {
       updateCase(caseId, { volume_order: JSON.stringify(orderedIds) })
+      createActivity(caseId, 'volume_reordered', `调整了卷宗材料排序（${orderedIds.length} 份材料）`)
     }
   )
 }

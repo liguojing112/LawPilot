@@ -10,6 +10,8 @@ __pycache__/
 data/lawpilot.db
 data/files/
 data/vectors/
+data/models/
 python/models/*
 !python/models/.gitkeep
+python/data/
 *.lock.db

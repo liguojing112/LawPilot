@@ -75,7 +75,7 @@ export function registerLawIpc(): void {
           // 发送进度事件
           const window = BrowserWindow.getAllWindows()[0]
           if (window) {
-            window.webContents.send('law:import-progress', {
+            window.webContents.send(IPC_CHANNELS.LAW_IMPORT_PROGRESS, {
               current: i + 1,
               total: filePaths.length,
               fileName: parsed.title,

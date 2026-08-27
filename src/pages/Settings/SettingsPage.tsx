@@ -1,8 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
-  Card, Form, Input, Button, Typography, Switch, Select, Divider, message, Tag, Space, Alert,
+  Card, Form, Input, Button, Typography, Switch, Select, Divider, message, Tag, Space, Alert, Spin,
 } from 'antd'
-import { SettingOutlined, ApiOutlined, CheckCircleOutlined, CloseCircleOutlined, InfoCircleOutlined } from '@ant-design/icons'
+import {
+  SettingOutlined, ApiOutlined, CheckCircleOutlined, CloseCircleOutlined, InfoCircleOutlined,
+  DatabaseOutlined,
+} from '@ant-design/icons'
+import type { KnowledgeStatus, KnowledgeRebuildResult } from '../../../shared/types'
 
 const { Title, Text } = Typography
 
@@ -44,6 +48,9 @@ export function SettingsPage() {
   const [selectedModel, setSelectedModel] = useState('deepseek-v4-pro')
   const [customModel, setCustomModel] = useState('')
   const [apiKeyInput, setApiKeyInput] = useState('')
+  const [kbStatus, setKbStatus] = useState<KnowledgeStatus | null>(null)
+  const [kbLoading, setKbLoading] = useState(false)
+  const [kbRebuilding, setKbRebuilding] = useState(false)
 
   const isCustom = selectedModel === '__custom__'
   const providerInfo = PROVIDER_CONFIG[selectedModel] || null
@@ -53,11 +60,51 @@ export function SettingsPage() {
 
   useEffect(() => {
     loadConfig()
+    loadKnowledgeStatus()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  async function loadKnowledgeStatus() {
+    setKbLoading(true)
+    try {
+      setKbStatus(await window.api.knowledge.status())
+    } catch {
+      setKbStatus({ doc_count: 0, ok: false, error: '查询失败' })
+    } finally {
+      setKbLoading(false)
+    }
+  }
+
+  async function handleKbRebuild() {
+    setKbRebuilding(true)
+    message.info('索引构建中，可能需要数分钟…')
+    try {
+      const res: KnowledgeRebuildResult = await window.api.knowledge.rebuild()
+      if (res.ok !== false) {
+        message.success(res.message || `索引重建完成（${res.doc_count} 个文档）`)
+      } else {
+        message.error(res.message || '索引重建失败')
+      }
+      loadKnowledgeStatus()
+    } catch (err) {
+      message.error(`索引重建失败: ${(err as Error).message}`)
+    } finally {
+      setKbRebuilding(false)
+    }
+  }
+
+  async function handlePrivacyLevelChange(level: string) {
+    setPrivacyLevel(level)
+    try {
+      await window.api.system.setConfig('ai.privacy_level', level)
+      message.success('脱敏级别已更新')
+    } catch (err) {
+      message.error(`保存失败: ${(err as Error).message}`)
+    }
+  }
+
   async function loadConfig() {
-    const keys = ['ai.api_key', 'ai.base_url', 'ai.model', 'ai.privacy_prompt_enabled']
+    const keys = ['ai.api_key', 'ai.base_url', 'ai.model', 'ai.privacy_prompt_enabled', 'ai.privacy_level']
     const values: Record<string, string> = {}
     for (const k of keys) {
       try {
@@ -70,6 +117,9 @@ export function SettingsPage() {
     setApiKeyInput(apiKey)
     const savedModel = values['ai.model'] || 'deepseek-v4-pro'
     const privacyEnabled = values['ai.privacy_prompt_enabled'] !== 'false'
+    if (values['ai.privacy_level']) {
+      setPrivacyLevel(values['ai.privacy_level'])
+    }
 
     let baseUrl = values['ai.base_url']
     if (!baseUrl) {
@@ -308,7 +358,7 @@ export function SettingsPage() {
             <Text strong>脱敏级别</Text>
             <Select
               value={privacyLevel}
-              onChange={setPrivacyLevel}
+              onChange={handlePrivacyLevelChange}
               style={{ width: 200, marginLeft: 16 }}
               options={[
                 { value: 'standard', label: '标准（身份证/手机号/银行账号/邮箱）' },
@@ -333,6 +383,44 @@ export function SettingsPage() {
               )}
             </Space>
           </div>
+        </div>
+      </Card>
+
+      <Card title="本地知识库" className="mb-4">
+        <div className="flex items-center justify-between">
+          <Space size="middle">
+            {kbLoading ? (
+              <Spin size="small" />
+            ) : (
+              <>
+                <Tag icon={<DatabaseOutlined />}>{kbStatus?.ok ? '索引就绪' : '索引不可用'}</Tag>
+                <Text>已索引 {kbStatus?.doc_count ?? 0} 个文档</Text>
+                {kbStatus?.error && (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {kbStatus.error}
+                  </Text>
+                )}
+              </>
+            )}
+          </Space>
+          <Space>
+            <Button onClick={loadKnowledgeStatus} loading={kbLoading} disabled={kbRebuilding}>
+              刷新状态
+            </Button>
+            <Button
+              type="primary"
+              onClick={handleKbRebuild}
+              loading={kbRebuilding}
+              disabled={kbLoading}
+            >
+              重建索引
+            </Button>
+          </Space>
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            重建会全量重新向量化法规与案件材料，耗时较长（视数据量数分钟），期间 AI 面板的「知识库问答」会基于旧索引。
+          </Text>
         </div>
       </Card>
 

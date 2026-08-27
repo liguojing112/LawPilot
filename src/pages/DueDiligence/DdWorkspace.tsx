@@ -27,6 +27,9 @@ export function DdWorkspace() {
       const result = await window.api.ai.generateReport('due_diligence', {
         materials_text: materialsText,
         risk_points: riskPoints,
+        target_company: projectInfo.targetCompany,
+        client: projectInfo.client,
+        scope: projectInfo.scope,
       })
       setReport(result)
     } catch (err) {

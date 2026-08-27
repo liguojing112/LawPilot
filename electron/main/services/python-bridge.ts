@@ -207,6 +207,15 @@ class PythonBridge {
     }
     return response.json() as Promise<T>
   }
+
+  /** 通用 GET */
+  async get<T>(endpoint: string): Promise<T> {
+    const response = await fetch(`${this.baseUrl}${endpoint}`)
+    if (!response.ok) {
+      throw new Error(`Python service error: ${response.status} ${response.statusText}`)
+    }
+    return response.json() as Promise<T>
+  }
 }
 
 export const pythonBridge = new PythonBridge()

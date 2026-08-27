@@ -20,6 +20,7 @@ export const IPC_CHANNELS = {
   LAW_LIST: 'law:list',
   LAW_COUNT: 'law:count',
   LAW_IMPORT: 'law:import',
+  LAW_IMPORT_PROGRESS: 'law:import-progress',
   LAW_EXPORT: 'law:export',
   LAW_COMPARE: 'law:compare',
   LAW_GET_ARTICLE: 'law:get-article',
@@ -44,11 +45,21 @@ export const IPC_CHANNELS = {
   AI_RAG_QUERY: 'ai:rag-query',
   AI_GENERATE_REPORT: 'ai:generate-report',
   AI_SWOT_ANALYSIS: 'ai:swot-analysis',
+  AI_CREATE_CONVERSATION: 'ai:create-conversation',
+  AI_LIST_CONVERSATIONS: 'ai:list-conversations',
+  AI_SAVE_MESSAGE: 'ai:save-message',
+  AI_DELETE_CONVERSATION: 'ai:delete-conversation',
+  AI_USAGE_STATS: 'ai:usage-stats',
+
+  // 知识库
+  KNOWLEDGE_STATUS: 'knowledge:status',
+  KNOWLEDGE_REBUILD: 'knowledge:rebuild',
 
   // 文件
   FILE_SELECT: 'file:select',
   FILE_GET_INFO: 'file:get-info',
   FILE_STORE: 'file:store',
+  FILE_READ_IMAGE: 'file:read-image',
 
   // 材料
   MATERIAL_IMPORT: 'material:import',
@@ -230,6 +241,7 @@ export interface CaseInfo {
   case_type: string
   case_status: string
   court: string
+  client: string
   filing_date: string
   description: string
   volume_order: string | null
@@ -248,23 +260,62 @@ export interface CaseParty {
 }
 
 // ---------- AI ----------
-export interface ChatMessage {
+/** 发送给 LLM 的单条消息（无需前端字段） */
+export interface LlmMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
+}
+
+export interface ChatMessage extends LlmMessage {
   timestamp: string
   tokenCount?: number
 }
 
-export interface AiConversation {
+/** RAG 检索来源（law_id 非空时可跳转法规条款） */
+export interface RagSource {
   id: string
-  caseId: string | null
+  source_type: string
   title: string
-  convType: 'chat' | 'rag' | 'report' | 'strategy'
-  messages: ChatMessage[]
-  model: string
-  totalTokens: number
-  createdAt: string
-  updatedAt: string
+  snippet: string
+  law_id: string | null
+  article_id: string | null
+}
+
+export interface RagResult {
+  answer: string
+  sources: RagSource[]
+  usage?: { prompt_tokens: number; completion_tokens: number }
+}
+
+export interface ConversationRow {
+  id: string
+  title: string | null
+  conv_type: string
+  messages: string
+  model: string | null
+  total_tokens: number
+  created_at: string
+  updated_at: string
+}
+
+export interface UsageStats {
+  calls: number
+  total_prompt_tokens: number
+  total_completion_tokens: number
+}
+
+export interface KnowledgeStatus {
+  doc_count: number
+  ok: boolean
+  error?: string
+}
+
+export interface KnowledgeRebuildResult {
+  ok?: boolean
+  doc_count: number
+  law_count?: number
+  material_count?: number
+  message: string
 }
 
 export interface SWOTResult {
@@ -273,6 +324,12 @@ export interface SWOTResult {
   opportunities: string[]
   threats: string[]
   analysis: string
+  timelines?: Array<{ date?: string; event?: string; importance?: string }>
+  parties?: Array<{ name?: string; role?: string }>
+  dispute_focus?: string[]
+  matched_laws?: Array<{ title?: string; article?: string; relevance?: string }>
+  suggestions?: string[]
+  _related_laws?: Array<{ title?: string; text?: string; law_id?: string | null; article_id?: string | null }>
 }
 
 // ---------- 通用 ----------
@@ -305,6 +362,7 @@ export interface LawPilotAPI {
     count(): Promise<number>
     getById(id: string): Promise<LawDetail | null>
     import(files: string[]): Promise<ImportResult>
+    onImportProgress(callback: (data: { current: number; total: number; fileName: string }) => void): () => void
     export(ids: string[], format: 'pdf' | 'docx'): Promise<string>
     compare(id1: string, id2: string): Promise<CompareResult>
     getRevisions(lawId: string): Promise<Revision[]>
@@ -318,7 +376,7 @@ export interface LawPilotAPI {
     create(data: Partial<CaseInfo>): Promise<CaseInfo>
     update(id: string, data: Partial<CaseInfo>): Promise<CaseInfo>
     delete(id: string): Promise<void>
-    exportCase(data: { caseId: string; format: string; savePath: string }): Promise<string>
+    exportCase(data: { caseId: string; format: string; savePath: string }): Promise<string | null>
     getActivities(caseId: string): Promise<ActivityRow[]>
   }
   material: {
@@ -333,15 +391,25 @@ export interface LawPilotAPI {
     onProcessed(callback: (data: { materialId: string; status: string; category?: string; error?: string; suggestedCaseNumber?: string }) => void): () => void
   }
   ai: {
-    chat(convId: string, message: string): Promise<string>
+    chat(convId: string, messages: LlmMessage[]): Promise<string>
     onStreamChunk(callback: (chunk: string) => void): () => void
     offStreamChunk(): void
-    ragQuery(query: string, context: string): Promise<string>
+    ragQuery(query: string, context?: string): Promise<RagResult>
     generateReport(template: string, data: unknown): Promise<string>
     swotAnalysis(facts: string): Promise<SWOTResult>
+    createConversation(title?: string, convType?: string): Promise<ConversationRow>
+    listConversations(): Promise<ConversationRow[]>
+    saveMessage(convId: string, messagesJson: string, tokens: number): Promise<void>
+    deleteConversation(convId: string): Promise<void>
+    usageStats(period: 'today' | 'week' | 'month'): Promise<UsageStats>
+  }
+  knowledge: {
+    status(): Promise<KnowledgeStatus>
+    rebuild(): Promise<KnowledgeRebuildResult>
   }
   file: {
     select(options?: { filters?: { name: string; extensions: string[] }[] }): Promise<string[] | null>
     getInfo(filePath: string): Promise<{ name: string; size: number; hash: string }>
+    readImage(filePath: string): Promise<string | null>
   }
 }

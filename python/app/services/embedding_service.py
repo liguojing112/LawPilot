@@ -26,13 +26,15 @@ _lancedb_table = None
 
 
 def _get_db_path() -> str:
-    """查找 SQLite 数据库路径"""
-    from pathlib import Path
-
-    home = Path.home()
-    candidates = list(home.glob("**/LawPilot/lawpilot.db"))
-    if candidates:
-        return str(candidates[0])
+    """查找 SQLite 数据库路径（与 llm.py 保持一致，避免递归遍历 home 目录）"""
+    candidates = [
+        os.path.join(os.getenv("APPDATA", ""), "lawpilot", "LawPilot", "lawpilot.db"),
+        os.path.join(os.getenv("APPDATA", ""), "LawPilot", "lawpilot.db"),
+        os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "LawPilot", "lawpilot.db"),
+    ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
     return ""
 
 

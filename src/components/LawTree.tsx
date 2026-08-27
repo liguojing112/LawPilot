@@ -1,7 +1,7 @@
 import { useMemo, useEffect, useRef } from 'react'
 import { Tree } from 'antd'
 import type { TreeDataNode } from 'antd'
-import type { LawArticle } from '../../../shared/types'
+import type { LawArticle } from '../../shared/types'
 
 interface Props {
   articles: LawArticle[]

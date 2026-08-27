@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Table, Button, Input, Select, Tag, Space, Typography, Progress, Alert, message } from 'antd'
+import { Table, Button, Input, Select, Tag, Space, Typography, Progress, notification, message } from 'antd'
 import { PlusOutlined, SearchOutlined, FileTextOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import type { ImportResult, LawSearchResult } from '../../../shared/types'
@@ -27,6 +27,8 @@ export function LawList() {
   const [keyword, setKeyword] = useState('')
   const [docType, setDocType] = useState<string | undefined>()
   const [status, setStatus] = useState<string | undefined>()
+  const [importing, setImporting] = useState(false)
+  const [importProgress, setImportProgress] = useState<{ current: number; total: number; fileName: string } | null>(null)
 
   const fetchList = useCallback(async () => {
     setLoading(true)
@@ -58,12 +60,36 @@ export function LawList() {
     })
     if (!files || files.length === 0) return
 
-    const result = await window.api.law.import(files)
-    if (result.imported > 0) {
-      const msg = `成功导入 ${result.imported} 部${result.skipped > 0 ? `，${result.skipped} 部跳过` : ''}`
-      // 静态导入 message（不要用动态 import()，会生成 import.meta.url）
-      message.success(msg)
-      fetchList()
+    setImporting(true)
+    setImportProgress({ current: 0, total: files.length, fileName: '' })
+    const unsub = window.api.law.onImportProgress((p) => setImportProgress(p))
+
+    try {
+      const result = await window.api.law.import(files)
+      if (result.imported > 0) {
+        message.success(`成功导入 ${result.imported} 部法规`)
+        fetchList()
+      }
+      if (result.errors.length > 0) {
+        notification.warning({
+          message: `导入完成（导入 ${result.imported} 部，跳过 ${result.skipped} 部）`,
+          description: (
+            <ul style={{ paddingLeft: 18, margin: 0, maxHeight: 220, overflow: 'auto' }}>
+              {result.errors.map((e, i) => (
+                <li key={i} style={{ fontSize: 12, lineHeight: '20px' }}>{e}</li>
+              ))}
+            </ul>
+          ),
+          duration: 0,
+          placement: 'bottomRight',
+        })
+      }
+    } catch (err) {
+      message.error(`导入失败: ${(err as Error).message}`)
+    } finally {
+      unsub()
+      setImporting(false)
+      setImportProgress(null)
     }
   }
 
@@ -126,10 +152,22 @@ export function LawList() {
           <FileTextOutlined className="mr-2" />
           法律法规汇编
         </Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={handleImport}>
+        <Button type="primary" icon={<PlusOutlined />} onClick={handleImport} loading={importing}>
           导入法规
         </Button>
       </div>
+
+      {importing && importProgress && (
+        <div className="mb-4" style={{ maxWidth: 420 }}>
+          <Progress
+            percent={Math.round((importProgress.current / importProgress.total) * 100)}
+            format={() => `${importProgress.current}/${importProgress.total}`}
+          />
+          <div className="text-xs text-gray-500">
+            正在导入：{importProgress.fileName || '准备中…'}
+          </div>
+        </div>
+      )}
 
       <Space className="mb-4" wrap>
         <Input

@@ -17,7 +17,7 @@ class ChatRequest(BaseModel):
     messages: list[dict]
     stream: bool = True
     temperature: float = 0.7
-    max_tokens: int = 2048
+    max_tokens: int = 8192
 
 
 class RagAskRequest(BaseModel):
@@ -29,6 +29,9 @@ class ReportRequest(BaseModel):
     materials_text: str
     risk_points: str = ""
     report_type: str = "due_diligence"
+    target_company: str = ""
+    client: str = ""
+    scope: str = ""
 
 
 class StrategyRequest(BaseModel):
@@ -59,14 +62,17 @@ def _find_db_path() -> str:
 
 def _get_ai_config() -> dict:
     db_path = _find_db_path()
-    defaults = {"api_key": "", "base_url": "https://api.deepseek.com/v1", "model": "deepseek-v4-pro"}
+    defaults = {
+        "api_key": "", "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-v4-pro", "privacy_level": "standard",
+    }
     if not os.path.exists(db_path):
         return defaults
     try:
         conn = sqlite3.connect(db_path)
         rows = conn.execute(
             "SELECT key, value FROM system_config WHERE key IN "
-            "('ai.api_key', 'ai.base_url', 'ai.model')"
+            "('ai.api_key', 'ai.base_url', 'ai.model', 'ai.privacy_level')"
         ).fetchall()
         conn.close()
         cfg = {}
@@ -78,11 +84,18 @@ def _get_ai_config() -> dict:
         return defaults
 
 
-async def _call_llm(messages: list[dict], temperature: float = 0.7, max_tokens: int = 2048):
-    """非流式 LLM 调用"""
+async def _call_llm(
+    messages: list[dict],
+    temperature: float = 0.7,
+    max_tokens: int = 8192,
+    return_usage: bool = False,
+):
+    """非流式 LLM 调用。return_usage=True 时返回 (content, usage_dict)"""
     config = _get_ai_config()
     if not config["api_key"]:
-        return "请先在设置页面配置 API Key"
+        empty_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+        msg = "请先在设置页面配置 API Key"
+        return (msg, empty_usage) if return_usage else msg
     try:
         from openai import AsyncOpenAI
         client = AsyncOpenAI(api_key=config["api_key"], base_url=config["base_url"])
@@ -92,15 +105,25 @@ async def _call_llm(messages: list[dict], temperature: float = 0.7, max_tokens: 
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        return resp.choices[0].message.content or ""
+        content = resp.choices[0].message.content or ""
+        if not return_usage:
+            return content
+        usage = getattr(resp, "usage", None)
+        usage_dict = {
+            "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+            "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+        } if usage else {"prompt_tokens": 0, "completion_tokens": 0}
+        return content, usage_dict
     except ImportError:
-        return "[错误] openai 库未安装，请运行 pip install openai"
+        msg = "[错误] openai 库未安装，请运行 pip install openai"
+        return (msg, {"prompt_tokens": 0, "completion_tokens": 0}) if return_usage else msg
     except Exception as e:
-        return f"[错误] {_friendly_error(e)}"
+        msg = f"[错误] {_friendly_error(e)}"
+        return (msg, {"prompt_tokens": 0, "completion_tokens": 0}) if return_usage else msg
 
 
-async def _stream_llm(messages: list[dict], temperature: float = 0.7, max_tokens: int = 2048):
-    """流式 LLM 调用 — SSE"""
+async def _stream_llm(messages: list[dict], temperature: float = 0.7, max_tokens: int = 8192):
+    """流式 LLM 调用 — SSE，done 事件附带 usage"""
     config = _get_ai_config()
     if not config["api_key"]:
         yield json.dumps({"content": "请先在设置页面配置 API Key", "done": True})
@@ -116,12 +139,19 @@ async def _stream_llm(messages: list[dict], temperature: float = 0.7, max_tokens
             temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
+            stream_options={"include_usage": True},
         )
-        async for chunk in stream:
+        usage = {"prompt_tokens": 0, "completion_tokens": 0}
+        async for chunk in resp:
+            if getattr(chunk, "usage", None):
+                usage = {
+                    "prompt_tokens": chunk.usage.prompt_tokens or 0,
+                    "completion_tokens": chunk.usage.completion_tokens or 0,
+                }
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta and delta.content:
                 yield json.dumps({"content": delta.content, "done": False})
-        yield json.dumps({"content": "", "done": True})
+        yield json.dumps({"content": "", "done": True, "usage": usage})
     except ImportError:
         yield json.dumps({"content": "[错误] openai 库未安装", "done": True})
     except Exception as e:
@@ -130,9 +160,10 @@ async def _stream_llm(messages: list[dict], temperature: float = 0.7, max_tokens
 
 @router.post("/chat")
 async def chat_endpoint(req: ChatRequest):
+    level = _get_ai_config().get("privacy_level", "standard")
     masked_msgs = []
     for msg in req.messages:
-        r = mask_text(msg.get("content", ""))
+        r = mask_text(msg.get("content", ""), level=level)
         masked_msgs.append({**msg, "content": r["masked_text"]})
 
     async def gen():
@@ -143,9 +174,10 @@ async def chat_endpoint(req: ChatRequest):
 
 @router.post("/simple")
 async def simple_chat(req: ChatRequest):
+    level = _get_ai_config().get("privacy_level", "standard")
     masked_msgs = []
     for msg in req.messages:
-        r = mask_text(msg.get("content", ""))
+        r = mask_text(msg.get("content", ""), level=level)
         masked_msgs.append({**msg, "content": r["masked_text"]})
     content = await _call_llm(masked_msgs, req.temperature, req.max_tokens)
     return {"content": content}
@@ -155,7 +187,7 @@ async def simple_chat(req: ChatRequest):
 async def rag_ask(req: RagAskRequest):
     question = req.question.strip()
     if not question:
-        return {"answer": "请输入问题", "sources": []}
+        return {"answer": "请输入问题", "sources": [], "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
 
     sources = []
     try:
@@ -178,12 +210,13 @@ async def rag_ask(req: RagAskRequest):
         {"role": "user", "content": question},
     ]
 
+    level = _get_ai_config().get("privacy_level", "standard")
     masked = []
     for msg in messages:
-        r = mask_text(msg["content"])
+        r = mask_text(msg["content"], level=level)
         masked.append({**msg, "content": r["masked_text"]})
 
-    answer = await _call_llm(masked, 0.3, 2048)
+    answer, usage = await _call_llm(masked, 0.3, 8192, return_usage=True)
     return {
         "answer": answer,
         "sources": [
@@ -192,6 +225,7 @@ async def rag_ask(req: RagAskRequest):
              "law_id": s.get("law_id"), "article_id": s.get("article_id")}
             for s in sources
         ],
+        "usage": usage,
     }
 
 
@@ -200,9 +234,19 @@ async def generate_report(req: ReportRequest):
     if not req.materials_text.strip():
         return {"content": "请先导入尽调资料"}
 
+    project_info = ""
+    if req.target_company or req.client or req.scope:
+        project_info = (
+            "\n项目信息:\n"
+            f"- 目标公司: {req.target_company or '（未提供）'}\n"
+            f"- 委托方: {req.client or '（未提供）'}\n"
+            f"- 尽调范围: {req.scope or '（未提供）'}\n"
+        )
+
     prompt = (
         "你是资深执业律师，请根据以下尽调资料生成一份《法律尽职调查报告》。\n\n"
-        "报告应包含:\n## 一、引言\n（目的、范围、方法）\n\n"
+        + project_info
+        + "报告应包含:\n## 一、引言\n（目的、范围、方法）\n\n"
         "## 二、公司概况\n（基本信息、股权结构、历史沿革）\n\n"
         "## 三、业务资质\n（经营许可、行业准入、资质证书）\n\n"
         "## 四、资产与产权\n（不动产、知识产权、重大资产）\n\n"
@@ -214,9 +258,10 @@ async def generate_report(req: ReportRequest):
         f"关键风险点:\n{req.risk_points or '（无特别提示）'}\n\n"
         "请用中文 Markdown 格式输出完整报告。"
     )
-    r = mask_text(prompt)
-    content = await _call_llm([{"role": "user", "content": r["masked_text"]}], 0.3, 4096)
-    return {"content": content}
+    level = _get_ai_config().get("privacy_level", "standard")
+    r = mask_text(prompt, level=level)
+    content, usage = await _call_llm([{"role": "user", "content": r["masked_text"]}], 0.3, 32768, return_usage=True)
+    return {"content": content, "usage": usage}
 
 
 @router.post("/strategy")
@@ -246,8 +291,9 @@ async def strategy_endpoint(req: StrategyRequest):
         '"analysis":"","suggestions":[]}\n\n'
         f"案情:\n{req.facts_text}\n\n相关法条:\n{laws_text}\n\n只输出JSON。"
     )
-    r = mask_text(prompt)
-    raw = await _call_llm([{"role": "user", "content": r["masked_text"]}], 0.7, 4096)
+    level = _get_ai_config().get("privacy_level", "standard")
+    r = mask_text(prompt, level=level)
+    raw, usage = await _call_llm([{"role": "user", "content": r["masked_text"]}], 0.7, 16384, return_usage=True)
 
     try:
         text = raw
@@ -262,6 +308,7 @@ async def strategy_endpoint(req: StrategyRequest):
                    "matched_laws": [], "suggestions": [], "parties": [],
                    "dispute_focus": []}
     parsed["_related_laws"] = related_laws
+    parsed["usage"] = usage
     return parsed
 
 
@@ -317,10 +364,14 @@ async def extract_entities_endpoint(req: ExtractEntitiesRequest):
         if not config.get("api_key"):
             return {"ok": False, "persons": [], "orgs": [], "dates": [], "amounts": [], "caseNumbers": [], "message": f"未配置 API Key（数据库: {_find_db_path()}）"}
 
+        # 按脱敏级别处理后再送云端，避免当事人姓名/证件号等原文外发
+        level = config.get("privacy_level", "standard")
+        masked = mask_text(text, level=level)["masked_text"]
+
         # 截断过长文本，控制 token 消耗
         max_chars = 6000
-        if len(text) > max_chars:
-            text = text[:max_chars] + "..."
+        if len(masked) > max_chars:
+            masked = masked[:max_chars] + "..."
 
         prompt = (
         "你是一个法律文书信息提取助手。请从以下文本中提取关键实体。\n"
@@ -333,7 +384,7 @@ async def extract_entities_endpoint(req: ExtractEntitiesRequest):
         "- dates: 日期（YYYY年MM月DD日格式）\n"
         "- amounts: 金额（含单位，如 50000元）\n"
         "- caseNumbers: 案号（如 (2024)京0105民初12345号）\n\n"
-        "文本：\n" + text + "\n\n"
+        "文本：\n" + masked + "\n\n"
         "只输出 JSON："
     )
 
@@ -343,7 +394,7 @@ async def extract_entities_endpoint(req: ExtractEntitiesRequest):
             model=config["model"],
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
-            max_tokens=1024,
+            max_tokens=4096,
         )
         msg = resp.choices[0].message
         raw = msg.content or ""

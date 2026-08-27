@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Card, Button, Tag, Row, Col, Typography, Space, Divider, Statistic, Popconfirm, message } from 'antd'
+import { Card, Button, Tag, Row, Col, Typography, Space, Divider, Statistic, Popconfirm, message, Segmented } from 'antd'
 import {
   FileTextOutlined,
   FolderOpenOutlined,
@@ -10,11 +10,12 @@ import {
   CloseCircleOutlined,
   LoadingOutlined,
   DeleteOutlined,
+  RobotOutlined,
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { SearchBar } from '../components/SearchBar'
 import { formatDate } from '../utils/dateFormat'
-import type { PythonStatus, DbStatus, MaterialRow } from '../../shared/types'
+import type { PythonStatus, DbStatus, MaterialRow, UsageStats } from '../../shared/types'
 
 const { Title, Text, Paragraph } = Typography
 
@@ -25,6 +26,8 @@ export function Dashboard() {
   const [dbStatus, setDbStatus] = useState<DbStatus | null>(null)
   const [recentMaterials, setRecentMaterials] = useState<MaterialRow[]>([])
   const [loading, setLoading] = useState(false)
+  const [aiPeriod, setAiPeriod] = useState<'today' | 'week' | 'month'>('today')
+  const [aiUsage, setAiUsage] = useState<UsageStats | null>(null)
 
   const initRef = useRef(false)
 
@@ -50,6 +53,18 @@ export function Dashboard() {
 
     tryInit()
   }, [])
+
+  useEffect(() => {
+    loadAiUsage(aiPeriod)
+  }, [aiPeriod])
+
+  async function loadAiUsage(period: 'today' | 'week' | 'month') {
+    try {
+      setAiUsage(await window.api.ai.usageStats(period))
+    } catch {
+      setAiUsage(null)
+    }
+  }
 
   async function loadRecentMaterials() {
     try {
@@ -185,6 +200,45 @@ export function Dashboard() {
           </Col>
         </Row>
       )}
+
+      {/* AI 使用概览 */}
+      <Card size="small" className="mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <Space>
+            <RobotOutlined className="text-purple-500" />
+            <Text strong>AI 使用概览</Text>
+          </Space>
+          <Segmented
+            size="small"
+            value={aiPeriod}
+            onChange={(v) => setAiPeriod(v as 'today' | 'week')}
+            options={[
+              { label: '今日', value: 'today' },
+              { label: '本周', value: 'week' },
+              { label: '本月', value: 'month' },
+            ]}
+          />
+        </div>
+        <Row gutter={[16, 16]}>
+          <Col xs={12} sm={8}>
+            <Statistic title="AI 调用次数" value={aiUsage?.calls ?? 0} />
+          </Col>
+          <Col xs={12} sm={8}>
+            <Statistic
+              title="输入 Tokens"
+              value={aiUsage?.total_prompt_tokens ?? 0}
+              suffix={
+                <Text type="secondary" className="text-xs">
+                  已脱敏
+                </Text>
+              }
+            />
+          </Col>
+          <Col xs={12} sm={8}>
+            <Statistic title="输出 Tokens" value={aiUsage?.total_completion_tokens ?? 0} />
+          </Col>
+        </Row>
+      </Card>
 
       {/* 最近上传材料 */}
       {recentMaterials.length > 0 && (

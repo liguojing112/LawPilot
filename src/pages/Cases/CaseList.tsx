@@ -69,6 +69,7 @@ export function CaseList() {
       case_number: c.case_number,
       case_type: c.case_type,
       court: c.court,
+      client: c.client,
       filing_date: c.filing_date ? dayjs(c.filing_date) : undefined,
       description: c.description,
     })
@@ -281,6 +282,10 @@ export function CaseList() {
             <Input placeholder="如：北京市朝阳区人民法院" />
           </Form.Item>
 
+          <Form.Item name="client" label="委托人">
+            <Input placeholder="委托人姓名或单位名称（可选）" />
+          </Form.Item>
+
           <Form.Item name="filing_date" label="立案日期">
             <DatePicker style={{ width: '100%' }} placeholder="选择日期" />
           </Form.Item>
@@ -337,6 +342,10 @@ export function CaseList() {
 
           <Form.Item name="court" label="管辖法院">
             <Input placeholder="如：北京市朝阳区人民法院" />
+          </Form.Item>
+
+          <Form.Item name="client" label="委托人">
+            <Input placeholder="委托人姓名或单位名称（可选）" />
           </Form.Item>
 
           <Form.Item name="filing_date" label="立案日期">

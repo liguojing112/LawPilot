@@ -24,6 +24,11 @@ const api: LawPilotAPI = {
     list: (params) => ipcRenderer.invoke(IPC_CHANNELS.LAW_LIST, params),
     count: () => ipcRenderer.invoke(IPC_CHANNELS.LAW_COUNT),
     import: (files: string[]) => ipcRenderer.invoke(IPC_CHANNELS.LAW_IMPORT, files),
+    onImportProgress: (callback: (data: { current: number; total: number; fileName: string }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: { current: number; total: number; fileName: string }) => callback(data)
+      ipcRenderer.on(IPC_CHANNELS.LAW_IMPORT_PROGRESS, handler)
+      return () => { ipcRenderer.removeListener(IPC_CHANNELS.LAW_IMPORT_PROGRESS, handler) }
+    },
     getById: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.LAW_GET_BY_ID, id),
     export: (ids: string[], format: 'pdf' | 'docx') =>
       ipcRenderer.invoke(IPC_CHANNELS.LAW_EXPORT, ids, format),
@@ -78,7 +83,7 @@ const api: LawPilotAPI = {
   },
 
   ai: {
-    chat: (convId, message) => ipcRenderer.invoke(IPC_CHANNELS.AI_CHAT, convId, message),
+    chat: (convId, messages) => ipcRenderer.invoke(IPC_CHANNELS.AI_CHAT, convId, messages),
     onStreamChunk: (callback) => {
       const handler = (_event: Electron.IpcRendererEvent, chunk: string) => callback(chunk)
       ipcRenderer.on(IPC_CHANNELS.AI_CHAT_STREAM_CHUNK, handler)
@@ -95,11 +100,27 @@ const api: LawPilotAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.AI_GENERATE_REPORT, template, data),
     swotAnalysis: (facts) =>
       ipcRenderer.invoke(IPC_CHANNELS.AI_SWOT_ANALYSIS, facts),
+    createConversation: (title?, convType?) =>
+      ipcRenderer.invoke(IPC_CHANNELS.AI_CREATE_CONVERSATION, title, convType),
+    listConversations: () =>
+      ipcRenderer.invoke(IPC_CHANNELS.AI_LIST_CONVERSATIONS),
+    saveMessage: (convId, messagesJson, tokens) =>
+      ipcRenderer.invoke(IPC_CHANNELS.AI_SAVE_MESSAGE, convId, messagesJson, tokens),
+    deleteConversation: (convId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.AI_DELETE_CONVERSATION, convId),
+    usageStats: (period) =>
+      ipcRenderer.invoke(IPC_CHANNELS.AI_USAGE_STATS, period),
+  },
+
+  knowledge: {
+    status: () => ipcRenderer.invoke(IPC_CHANNELS.KNOWLEDGE_STATUS),
+    rebuild: () => ipcRenderer.invoke(IPC_CHANNELS.KNOWLEDGE_REBUILD),
   },
 
   file: {
     select: (options) => ipcRenderer.invoke(IPC_CHANNELS.FILE_SELECT, options),
     getInfo: (filePath: string) => ipcRenderer.invoke(IPC_CHANNELS.FILE_GET_INFO, filePath),
+    readImage: (filePath: string) => ipcRenderer.invoke(IPC_CHANNELS.FILE_READ_IMAGE, filePath),
   },
 }
 

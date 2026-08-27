@@ -64,6 +64,7 @@ export function CaseDetail() {
   const [editOpen, setEditOpen] = useState(false)
   const [editSaving, setEditSaving] = useState(false)
   const [editForm] = Form.useForm()
+  const [preview, setPreview] = useState<{ material: MaterialRow; image?: string } | null>(null)
 
   useEffect(() => {
     if (!id) return
@@ -114,8 +115,11 @@ export function CaseDetail() {
   async function handleExport(format: 'pdf' | 'zip') {
     if (!id) return
     try {
-      await window.api.case.exportCase({ caseId: id, format, savePath: '' })
-      message.success(`已导出 ${format.toUpperCase()}`)
+      const savedPath = await window.api.case.exportCase({ caseId: id, format, savePath: '' })
+      // 用户在保存对话框中取消时，主进程返回 null，不提示成功
+      if (savedPath) {
+        message.success(`已导出 ${format.toUpperCase()}：${savedPath}`)
+      }
     } catch (err) {
       message.error(`导出失败: ${(err as Error).message}`)
     }
@@ -151,12 +155,14 @@ export function CaseDetail() {
   }
 
   function openEdit(): void {
+    if (!caseInfo) return
     editForm.setFieldsValue({
       title: caseInfo.title,
       case_number: caseInfo.case_number,
       case_type: caseInfo.case_type,
       case_status: caseInfo.case_status,
       court: caseInfo.court,
+      client: caseInfo.client,
       filing_date: caseInfo.filing_date ? dayjs(caseInfo.filing_date) : undefined,
       description: caseInfo.description,
     })
@@ -179,6 +185,15 @@ export function CaseDetail() {
       message.error(`更新失败: ${(err as Error).message}`)
     } finally {
       setEditSaving(false)
+    }
+  }
+
+  async function handlePreview(item: MaterialRow) {
+    if ((item.mime_type || '').startsWith('image/')) {
+      const image = await window.api.file.readImage(item.stored_path)
+      setPreview({ material: item, image: image || undefined })
+    } else {
+      setPreview({ material: item })
     }
   }
 
@@ -231,17 +246,8 @@ export function CaseDetail() {
                   <List.Item
                     actions={[
                       item.ocr_status === 'done' && (
-                        <Button
-                          key="view"
-                          type="link"
-                          size="small"
-                          onClick={() => {
-                            if (item.raw_text) {
-                              window.alert(item.raw_text.slice(0, 2000))
-                            }
-                          }}
-                        >
-                          预览文本
+                        <Button key="view" type="link" size="small" onClick={() => handlePreview(item)}>
+                          预览
                         </Button>
                       ),
                       <Button
@@ -401,6 +407,7 @@ export function CaseDetail() {
             <Tag color={status.color}>{status.label}</Tag>
           </Descriptions.Item>
           <Descriptions.Item label="管辖法院">{caseInfo.court || '-'}</Descriptions.Item>
+          <Descriptions.Item label="委托人">{caseInfo.client || '-'}</Descriptions.Item>
           <Descriptions.Item label="立案日期">{caseInfo.filing_date || '-'}</Descriptions.Item>
           <Descriptions.Item label="创建时间">
             {formatDateTime(caseInfo.created_at)}
@@ -470,6 +477,10 @@ export function CaseDetail() {
             <Input placeholder="如：北京市朝阳区人民法院" />
           </Form.Item>
 
+          <Form.Item name="client" label="委托人">
+            <Input placeholder="委托人姓名或单位名称（可选）" />
+          </Form.Item>
+
           <Form.Item name="filing_date" label="立案日期">
             <DatePicker style={{ width: '100%' }} placeholder="选择日期" />
           </Form.Item>
@@ -478,6 +489,50 @@ export function CaseDetail() {
             <Input.TextArea rows={3} placeholder="简要案情描述（可选）" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title={preview ? `材料预览：${preview.material.original_name}` : '材料预览'}
+        open={!!preview}
+        onCancel={() => setPreview(null)}
+        footer={null}
+        width={860}
+      >
+        {preview?.image ? (
+          <img
+            src={preview.image}
+            alt={preview.material.original_name}
+            style={{ width: '100%', display: 'block' }}
+          />
+        ) : (
+          <div>
+            {preview?.material.raw_text ? (
+              <pre
+                style={{
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all',
+                  fontSize: 13,
+                  lineHeight: 1.7,
+                  maxHeight: 560,
+                  overflow: 'auto',
+                  background: '#fafafa',
+                  padding: 16,
+                  borderRadius: 6,
+                }}
+              >
+                {preview.material.raw_text}
+              </pre>
+            ) : (
+              <Empty
+                description={
+                  (preview?.material.mime_type || '').startsWith('image/')
+                    ? '图片加载失败或文件过大'
+                    : '该材料暂无可预览的文本内容'
+                }
+              />
+            )}
+          </div>
+        )}
       </Modal>
     </div>
   )

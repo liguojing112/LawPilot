@@ -1,13 +1,13 @@
 import { ipcMain, BrowserWindow } from 'electron'
-import { IPC_CHANNELS } from '../../../shared/types'
+import { IPC_CHANNELS, type LlmMessage } from '../../../shared/types'
 import { pythonBridge } from '../services/python-bridge'
 import {
   createConversation,
   updateConversationMessages,
+  deleteConversation,
   listConversations,
   createUsageLog,
   getUsageStats,
-  type ConvRow,
 } from '../services/database'
 
 /** Electron 主进程侧简易脱敏（避免每次调用 Python） */
@@ -21,14 +21,13 @@ function quickMask(text: string): string {
 
 export function registerAiIpc(): void {
   // ---- 流式聊天 ----
-  ipcMain.handle(IPC_CHANNELS.AI_CHAT, async (event, convId: string, message: string) => {
+  ipcMain.handle(IPC_CHANNELS.AI_CHAT, async (event, convId: string, messages: LlmMessage[]) => {
     const window = BrowserWindow.fromWebContents(event.sender)
 
     try {
-      // 脱敏
-      const masked = quickMask(message)
+      // 脱敏（仅最近一轮用户输入需要主进程快速脱敏，Python 端还会按脱敏级别处理）
+      const masked = messages.map((m) => ({ ...m, content: quickMask(m.content) }))
 
-      // 调用 Python LLM 流式端点
       const status = await pythonBridge.getStatus()
       if (!status.running) {
         return 'Python 服务未启动，请先启动 Python 服务'
@@ -39,7 +38,7 @@ export function registerAiIpc(): void {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          messages: [{ role: 'user', content: masked }],
+          messages: masked,
           stream: true,
         }),
       })
@@ -73,6 +72,13 @@ export function registerAiIpc(): void {
                 }
               }
               if (parsed.done) {
+                // 记录用量（Python 端在 done 事件附带 usage）
+                const usage = parsed.usage || {}
+                try {
+                  createUsageLog(convId, null, usage.prompt_tokens || 0, usage.completion_tokens || 0)
+                } catch (e) {
+                  console.error('记录用量失败:', e)
+                }
                 if (window && !window.isDestroyed()) {
                   window.webContents.send(IPC_CHANNELS.AI_CHAT_STREAM_DONE, fullContent)
                 }
@@ -98,13 +104,23 @@ export function registerAiIpc(): void {
         return { answer: 'Python 服务未启动', sources: [] }
       }
 
-      const result = await pythonBridge.post<{ answer: string; sources: unknown[] }>(
-        '/llm/rag-ask',
-        { question: query, top_k: 5 }
-      )
+      const result = await pythonBridge.post<{
+        answer: string
+        sources: unknown[]
+        usage?: { prompt_tokens: number; completion_tokens: number }
+      }>('/llm/rag-ask', { question: query, top_k: 5 })
 
       // 记录 usage log
-      createUsageLog(null, null, 0, 0)
+      try {
+        createUsageLog(
+          null,
+          null,
+          result.usage?.prompt_tokens || 0,
+          result.usage?.completion_tokens || 0
+        )
+      } catch (e) {
+        console.error('记录用量失败:', e)
+      }
 
       return result
     } catch (err) {
@@ -122,11 +138,29 @@ export function registerAiIpc(): void {
           return 'Python 服务未启动'
         }
 
-        const result = await pythonBridge.post<{ content: string }>('/llm/report', {
-          materials_text: typeof data === 'object' && (data as any)?.materials_text || String(data),
-          risk_points: typeof data === 'object' ? (data as any)?.risk_points || '' : '',
+        const d = typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : {}
+        const result = await pythonBridge.post<{
+          content: string
+          usage?: { prompt_tokens: number; completion_tokens: number }
+        }>('/llm/report', {
+          materials_text: d.materials_text || String(data),
+          risk_points: d.risk_points || '',
           report_type: template,
+          target_company: d.target_company || '',
+          client: d.client || '',
+          scope: d.scope || '',
         })
+
+        try {
+          createUsageLog(
+            null,
+            null,
+            result.usage?.prompt_tokens || 0,
+            result.usage?.completion_tokens || 0
+          )
+        } catch (e) {
+          console.error('记录用量失败:', e)
+        }
         return result.content
       } catch (err) {
         return `[错误] ${(err as Error).message}`
@@ -134,7 +168,7 @@ export function registerAiIpc(): void {
     }
   )
 
-  // ---- SWOT 分析 ----
+  // ---- SWOT 分析（透传全部字段：timelines/parties/dispute_focus/matched_laws/suggestions/_related_laws） ----
   ipcMain.handle(IPC_CHANNELS.AI_SWOT_ANALYSIS, async (_event, facts: string) => {
     try {
       const status = await pythonBridge.getStatus()
@@ -149,18 +183,64 @@ export function registerAiIpc(): void {
         facts_text: facts,
       })
 
+      const usage = result.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined
+      try {
+        createUsageLog(null, null, usage?.prompt_tokens || 0, usage?.completion_tokens || 0)
+      } catch (e) {
+        console.error('记录用量失败:', e)
+      }
+
       return {
         strengths: result.strengths || [],
         weaknesses: result.weaknesses || [],
         opportunities: result.opportunities || [],
         threats: result.threats || [],
         analysis: result.analysis || '',
+        timelines: result.timelines || [],
+        parties: result.parties || [],
+        dispute_focus: result.dispute_focus || [],
+        matched_laws: result.matched_laws || [],
+        suggestions: result.suggestions || [],
+        _related_laws: result._related_laws || [],
       }
     } catch (err) {
       return {
         strengths: [], weaknesses: [], opportunities: [], threats: [],
         analysis: `[错误] ${(err as Error).message}`,
       }
+    }
+  })
+
+  // ---- 知识库 ----
+  ipcMain.handle(IPC_CHANNELS.KNOWLEDGE_STATUS, async () => {
+    try {
+      const status = await pythonBridge.getStatus()
+      if (!status.running) {
+        return { doc_count: 0, ok: false, error: 'Python 服务未启动' }
+      }
+      return await pythonBridge.get<{ doc_count: number; ok: boolean; error?: string }>(
+        '/knowledge/status'
+      )
+    } catch (err) {
+      return { doc_count: 0, ok: false, error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.KNOWLEDGE_REBUILD, async () => {
+    try {
+      const status = await pythonBridge.getStatus()
+      if (!status.running) {
+        return { doc_count: 0, ok: false, error: 'Python 服务未启动' }
+      }
+      // 全量重建索引是同步长任务，设置较长超时
+      return await pythonBridge.post<{
+        doc_count: number
+        law_count: number
+        material_count: number
+        message: string
+      }>('/knowledge/rebuild', {})
+    } catch (err) {
+      return { doc_count: 0, ok: false, error: (err as Error).message }
     }
   })
 
@@ -179,6 +259,10 @@ export function registerAiIpc(): void {
       updateConversationMessages(convId, messagesJson, tokens)
     }
   )
+
+  ipcMain.handle('ai:delete-conversation', (_event, convId: string) => {
+    deleteConversation(convId)
+  })
 
   // ---- 使用统计 ----
   ipcMain.handle('ai:usage-stats', (_event, period: 'today' | 'week' | 'month') => {

@@ -18,6 +18,8 @@ const { Text } = Typography
 interface FileItem {
   id: string
   name: string
+  /** Electron 渲染进程中 File 携带的完整路径，拖拽导入时传给主进程 */
+  path?: string
   size: number
   status: 'pending' | 'processing' | 'done' | 'error'
   error?: string
@@ -91,13 +93,16 @@ export function FileDropZone({ cases = [], onMaterialProcessed }: Props) {
     dragCounter.current = 0
 
     const droppedFiles: FileItem[] = []
+    let droppedAny = false
     if (e.dataTransfer.files) {
       for (let i = 0; i < e.dataTransfer.files.length; i++) {
         const f = e.dataTransfer.files[i]
+        droppedAny = true
         if (f.path && isAllowed(f.name)) {
           droppedFiles.push({
             id: `temp_${Date.now()}_${i}`,
             name: f.name,
+            path: f.path,
             size: f.size,
             status: 'pending',
           })
@@ -107,9 +112,9 @@ export function FileDropZone({ cases = [], onMaterialProcessed }: Props) {
 
     if (droppedFiles.length > 0) {
       setFiles((prev) => [...prev, ...droppedFiles])
-      // 立即启动导入
-      importFiles(droppedFiles.map((f) => f.name))
-    } else if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      // 立即启动导入（传完整路径，主进程据此读文件）
+      importFiles(droppedFiles.map((f) => f.path!))
+    } else if (droppedAny) {
       message.warning('部分文件格式不支持，仅支持 PDF/图片/Word/TXT')
     }
   }, [])
@@ -138,11 +143,6 @@ export function FileDropZone({ cases = [], onMaterialProcessed }: Props) {
         f.status === 'pending' ? { ...f, status: 'processing' as const } : f
       )
     )
-
-    // 监听处理完成事件
-    const unsub = window.api.ai.onStreamChunk
-      ? () => {} // 占位，实际用 IPC event 监听
-      : () => {}
 
     try {
       const results = await window.api.material.import(filePaths)

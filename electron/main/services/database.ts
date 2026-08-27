@@ -121,6 +121,7 @@ function initializeSchema(db: Database.Database): void {
       case_type TEXT NOT NULL,
       case_status TEXT NOT NULL DEFAULT 'active',
       court TEXT,
+      client TEXT,
       filing_date TEXT,
       description TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -175,6 +176,12 @@ function initializeSchema(db: Database.Database): void {
     // 列已存在，忽略
   }
 
+  try {
+    db.exec(`ALTER TABLE cases ADD COLUMN client TEXT`)
+  } catch {
+    // 列已存在，忽略
+  }
+
   // conversations + usage_logs 表
   db.exec(`
     CREATE TABLE IF NOT EXISTS conversations (
@@ -203,6 +210,25 @@ function initializeSchema(db: Database.Database): void {
       value TEXT NOT NULL DEFAULT '',
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+  `)
+
+  migrateArticleParents(db)
+}
+
+/**
+ * 存量数据迁移：早期版本把父条款的 order_num（如 "5"）直接存进 parent_id，
+ * 导致前端按 UUID 建树时匹配失败。把这类引用解析为真实条款 UUID。
+ * 只处理"parent_id 不是任何条款 id、但等于同法下某条款 order_num"的行，幂等。
+ */
+function migrateArticleParents(db: Database.Database): void {
+  db.exec(`
+    UPDATE articles SET parent_id = (
+      SELECT p.id FROM articles p
+      WHERE p.law_id = articles.law_id
+        AND CAST(p.order_num AS TEXT) = articles.parent_id
+    )
+    WHERE parent_id IS NOT NULL
+      AND parent_id NOT IN (SELECT id FROM articles)
   `)
 }
 
@@ -282,8 +308,10 @@ export interface CaseRow {
   case_type: string
   case_status: string
   court: string | null
+  client: string | null
   filing_date: string | null
   description: string | null
+  volume_order: string | null
   created_at: string
   updated_at: string
 }
@@ -384,7 +412,7 @@ export function getArticlesByLawId(lawId: string): ArticleRow[] {
 
 let insertArticleStmt: Database.Statement | null = null
 
-/** 批量插入条款（使用事务） */
+/** 批量插入条款（使用事务）。入参 parent_id 为父条款 order_num 的字符串（parseLawFile 产出），此处解析为真实父级 UUID */
 export function insertArticles(
   articles: Array<{
     law_id: string
@@ -405,9 +433,18 @@ export function insertArticles(
     )
   }
 
+  // 先为所有条款分配 UUID，构建 "lawId:orderNum" → id 映射，再解析父引用
+  const idByKey = new Map<string, string>()
+  const prepared = articles.map((a) => {
+    const id = uuidv4()
+    idByKey.set(`${a.law_id}:${a.order_num}`, id)
+    return { ...a, id }
+  })
+
   const insertMany = db.transaction(
     (
       items: Array<{
+        id: string
         law_id: string
         parent_id?: string | null
         level?: number
@@ -418,10 +455,13 @@ export function insertArticles(
       }>
     ) => {
       for (const a of items) {
+        const parentNum = a.parent_id != null ? Number(a.parent_id) : NaN
+        const parentId =
+          Number.isInteger(parentNum) ? idByKey.get(`${a.law_id}:${parentNum}`) ?? null : null
         insertArticleStmt!.run({
-          id: uuidv4(),
+          id: a.id,
           law_id: a.law_id,
-          parent_id: a.parent_id || null,
+          parent_id: parentId,
           level: a.level || 4,
           order_num: a.order_num,
           article_num: a.article_num || null,
@@ -432,7 +472,7 @@ export function insertArticles(
     }
   )
 
-  insertMany(articles)
+  insertMany(prepared)
 }
 
 // ---- 全文检索 ----
@@ -574,20 +614,22 @@ export function createCase(data: {
   title: string
   case_type: string
   court?: string
+  client?: string
   filing_date?: string
   description?: string
 }): CaseRow {
   const db = getDatabase()
   const id = uuidv4()
   db.prepare(
-    `INSERT INTO cases (id, case_number, title, case_type, court, filing_date, description)
-     VALUES (@id, @case_number, @title, @case_type, @court, @filing_date, @description)`
+    `INSERT INTO cases (id, case_number, title, case_type, court, client, filing_date, description)
+     VALUES (@id, @case_number, @title, @case_type, @court, @client, @filing_date, @description)`
   ).run({
     id,
     case_number: data.case_number || null,
     title: data.title,
     case_type: data.case_type,
     court: data.court || null,
+    client: data.client || null,
     filing_date: data.filing_date || null,
     description: data.description || null,
   })
@@ -637,6 +679,7 @@ export function updateCase(
     case_type?: string
     case_status?: string
     court?: string
+    client?: string
     filing_date?: string
     description?: string
     volume_order?: string
@@ -868,6 +911,12 @@ export function updateConversationMessages(
   db.prepare(
     "UPDATE conversations SET messages = @messages, total_tokens = total_tokens + @delta, updated_at = datetime('now') WHERE id = @id"
   ).run({ messages: messagesJson, delta: tokenDelta, id })
+}
+
+export function deleteConversation(id: string): void {
+  const db = getDatabase()
+  db.prepare('DELETE FROM usage_logs WHERE conv_id = ?').run(id)
+  db.prepare('DELETE FROM conversations WHERE id = ?').run(id)
 }
 
 // ---- Usage Logs ----

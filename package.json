@@ -3,15 +3,28 @@
   "version": "1.0.0",
   "description": "LawPilot - 律师智能工作平台",
   "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
+    "package:win": "electron-vite build && electron-builder --win",
+    "python:dev": "cd python && python -m uvicorn app.main:app --host 127.0.0.1 --port 18920"
+  },
   "dependencies": {
     "better-sqlite3": "^11.0.0",
     "jspdf": "^4.2.1",
+    "jszip": "^3.10.1",
+    "pdf-lib": "^1.17.1",
     "uuid": "^10.0.0"
   },
   "devDependencies": {
     "@ant-design/icons": "^6.3.2",
     "@electron/remote": "^2.1.3",
     "@types/archiver": "^8.0.0",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "@types/uuid": "^10.0.0",
     "@vitejs/plugin-react": "^4.7.0",
     "antd": "^6.5.0",
     "archiver": "^8.0.0",
