@@ -1,0 +1,30 @@
+[project]
+name = "lawpilot-python"
+version = "0.1.0"
+description = "LawPilot Python 微服务 — OCR、NER、向量检索"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.112.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.8.0",
+    "python-multipart>=0.0.9",
+    "paddleocr>=2.8.0",
+    "paddlepaddle>=3.0.0",
+    "sentence-transformers>=3.0.0",
+    "lancedb>=0.12.0",
+    "pyarrow>=17.0.0",
+    "aiofiles>=24.0.0",
+    "httpx>=0.27.0",
+    "openai>=1.50.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.6.0",
+]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"

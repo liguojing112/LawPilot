@@ -1,0 +1,15 @@
+node_modules/
+out/
+dist/
+debug-win-unpacked/
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.log
+data/lawpilot.db
+data/files/
+data/vectors/
+python/models/*
+!python/models/.gitkeep
+*.lock.db
