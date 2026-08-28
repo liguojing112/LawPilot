@@ -110,6 +110,8 @@ const api: LawPilotAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.AI_DELETE_CONVERSATION, convId),
     usageStats: (period) =>
       ipcRenderer.invoke(IPC_CHANNELS.AI_USAGE_STATS, period),
+    privacyPreview: (text, level) =>
+      ipcRenderer.invoke(IPC_CHANNELS.AI_PRIVACY_PREVIEW, text, level),
   },
 
   knowledge: {

@@ -10,7 +10,7 @@ from pydantic import BaseModel
 router = APIRouter(prefix="/llm", tags=["llm"])
 
 # 延迟导入，避免启动就要求 openai 已安装
-from app.services.privacy import mask_text
+from app.services.privacy import mask_text, preview_mask
 
 
 class ChatRequest(BaseModel):
@@ -472,3 +472,18 @@ async def extract_entities_endpoint(req: ExtractEntitiesRequest):
         return {"ok": False, "persons": [], "orgs": [], "dates": [], "amounts": [], "caseNumbers": [], "message": "openai 库未安装"}
     except Exception as e:
         return {"ok": False, "persons": [], "orgs": [], "dates": [], "amounts": [], "caseNumbers": [], "message": _friendly_error(e)}
+
+
+class PrivacyPreviewRequest(BaseModel):
+    text: str
+    level: str = "standard"
+
+
+@router.post("/privacy/preview")
+async def privacy_preview(req: PrivacyPreviewRequest):
+    """预览脱敏结果"""
+    try:
+        result = preview_mask(req.text, req.level)
+        return {"ok": True, "preview": result}
+    except Exception as e:
+        return {"ok": False, "message": _friendly_error(e)}

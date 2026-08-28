@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  Drawer, Button, Input, Switch, Tag, Space, Select, Popconfirm, Empty, Spin, Typography, message,
+  Drawer, Button, Input, Switch, Tag, Space, Select, Popconfirm, Empty, Spin, Typography, message, Modal,
 } from 'antd'
 import {
   PlusOutlined,
@@ -49,6 +49,11 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
   const [ragSources, setRagSources] = useState<RagResult | null>(null)
   const [ragLoading, setRagLoading] = useState(false)
   const [streaming, setStreaming] = useState(false)
+  const [privacyPromptEnabled, setPrivacyPromptEnabled] = useState(false)
+  const [privacyLevel, setPrivacyLevel] = useState('standard')
+  const [showPrivacyConfirm, setShowPrivacyConfirm] = useState(false)
+  const [privacyPreview, setPrivacyPreview] = useState<Array<{ original: string; placeholder: string }>>([])
+  const [pendingSend, setPendingSend] = useState<{ text: string; convId: string | null } | null>(null)
   const listEndRef = useRef<HTMLDivElement>(null)
   const streamBufRef = useRef('')
 
@@ -61,7 +66,16 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
   }
 
   useEffect(() => {
-    if (open) refreshConversations()
+    if (open) {
+      refreshConversations()
+      // 读取隐私设置
+      window.api.system.getConfig('ai.privacy_prompt_enabled').then((value) => {
+        setPrivacyPromptEnabled(value !== 'false')
+      }).catch(() => {})
+      window.api.system.getConfig('ai.privacy_level').then((value) => {
+        if (value) setPrivacyLevel(value)
+      }).catch(() => {})
+    }
   }, [open])
 
   // 切换会话时加载历史消息
@@ -131,6 +145,50 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
       }
     }
 
+    // 如果隐私确认启用，先预览脱敏结果
+    if (privacyPromptEnabled) {
+      try {
+        const result = await window.api.ai.privacyPreview(text, privacyLevel)
+        if (result.ok && result.preview && result.preview.length > 0) {
+          setPrivacyPreview(result.preview)
+          setPendingSend({ text, convId })
+          setShowPrivacyConfirm(true)
+          return
+        }
+      } catch {
+        // 预览失败时继续发送
+      }
+    }
+
+    // 直接发送
+    executeSend(text, convId)
+  }
+
+  async function persist(convId: string, msgs: ChatMessage[], tokenDelta: number) {
+    try {
+      await window.api.ai.saveMessage(convId, JSON.stringify(msgs), tokenDelta)
+      refreshConversations()
+    } catch (err) {
+      console.error('会话保存失败:', err)
+    }
+  }
+
+  function handlePrivacyConfirm() {
+    setShowPrivacyConfirm(false)
+    if (pendingSend) {
+      // 继续发送消息
+      executeSend(pendingSend.text, pendingSend.convId)
+      setPendingSend(null)
+    }
+  }
+
+  function handlePrivacyCancel() {
+    setShowPrivacyConfirm(false)
+    setPendingSend(null)
+    setPrivacyPreview([])
+  }
+
+  async function executeSend(text: string, convId: string | null) {
     const userMsg: ChatMessage = { role: 'user', content: text, timestamp: new Date().toISOString() }
     const history = [...messages, userMsg]
     setMessages(history)
@@ -159,7 +217,7 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
       } finally {
         setRagLoading(false)
       }
-      await persist(convId, finalMessages, estimateTokens(finalMessages[finalMessages.length - 1]?.content || ''))
+      await persist(convId!, finalMessages, estimateTokens(finalMessages[finalMessages.length - 1]?.content || ''))
       return
     }
 
@@ -177,8 +235,7 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
 
     let finalMessages: ChatMessage[] = history
     try {
-      const reply = await window.api.ai.chat(convId, history.map((m) => ({ role: m.role, content: m.content })))
-      // 流式未产生内容（如后端错误）时用返回值兜底
+      const reply = await window.api.ai.chat(convId!, history.map((m) => ({ role: m.role, content: m.content })))
       const content = streamBufRef.current || reply
       finalMessages = [...history, { role: 'assistant', content, timestamp: new Date().toISOString() }]
       setMessages(finalMessages)
@@ -192,16 +249,7 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
       unsub()
       setStreaming(false)
     }
-    await persist(convId, finalMessages, estimateTokens(finalMessages[finalMessages.length - 1]?.content || ''))
-  }
-
-  async function persist(convId: string, msgs: ChatMessage[], tokenDelta: number) {
-    try {
-      await window.api.ai.saveMessage(convId, JSON.stringify(msgs), tokenDelta)
-      refreshConversations()
-    } catch (err) {
-      console.error('会话保存失败:', err)
-    }
+    await persist(convId!, finalMessages, estimateTokens(finalMessages[finalMessages.length - 1]?.content || ''))
   }
 
   function handleSourceJump(source: { law_id: string | null; article_id: string | null }) {
@@ -347,6 +395,47 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
           </div>
         )}
       </div>
+
+      {/* 隐私确认弹窗 */}
+      <Modal
+        title="敏感信息脱敏确认"
+        open={showPrivacyConfirm}
+        onOk={handlePrivacyConfirm}
+        onCancel={handlePrivacyCancel}
+        okText="确认发送"
+        cancelText="取消"
+        width={480}
+      >
+        <div style={{ marginBottom: 12 }}>
+          <Text>以下内容将被脱敏后发送给AI：</Text>
+        </div>
+        <div
+          style={{
+            background: '#f5f5f5',
+            padding: '12px',
+            borderRadius: 8,
+            maxHeight: 200,
+            overflow: 'auto',
+            fontSize: 13,
+          }}
+        >
+          {privacyPreview.map((item, index) => (
+            <div key={index} style={{ marginBottom: 8 }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {item.placeholder}
+              </Text>
+              <div style={{ color: '#ff4d4f', textDecoration: 'line-through' }}>
+                {item.original}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            脱敏后的内容将发送给AI，原始信息不会被传输。
+          </Text>
+        </div>
+      </Modal>
 
       {/* 输入区 */}
       <div className="mt-3 flex items-end gap-2">

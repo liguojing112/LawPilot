@@ -268,4 +268,20 @@ export function registerAiIpc(): void {
   ipcMain.handle('ai:usage-stats', (_event, period: 'today' | 'week' | 'month') => {
     return getUsageStats(period)
   })
+
+  // ---- 隐私预览 ----
+  ipcMain.handle(IPC_CHANNELS.AI_PRIVACY_PREVIEW, async (_event, text: string, level?: string) => {
+    try {
+      const status = await pythonBridge.getStatus()
+      if (!status.running) {
+        return { ok: false, message: 'Python 服务未启动' }
+      }
+      return await pythonBridge.post<{ ok: boolean; preview?: unknown[]; message?: string }>(
+        '/llm/privacy/preview',
+        { text, level: level || 'standard' }
+      )
+    } catch (err) {
+      return { ok: false, message: (err as Error).message }
+    }
+  })
 }

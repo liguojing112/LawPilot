@@ -51,6 +51,9 @@ export const IPC_CHANNELS = {
   AI_DELETE_CONVERSATION: 'ai:delete-conversation',
   AI_USAGE_STATS: 'ai:usage-stats',
 
+  // 隐私
+  AI_PRIVACY_PREVIEW: 'ai:privacy-preview',
+
   // 知识库
   KNOWLEDGE_STATUS: 'knowledge:status',
   KNOWLEDGE_REBUILD: 'knowledge:rebuild',
@@ -402,6 +405,7 @@ export interface LawPilotAPI {
     saveMessage(convId: string, messagesJson: string, tokens: number): Promise<void>
     deleteConversation(convId: string): Promise<void>
     usageStats(period: 'today' | 'week' | 'month'): Promise<UsageStats>
+    privacyPreview(text: string, level?: string): Promise<{ ok: boolean; preview?: Array<{ original: string; placeholder: string }>; message?: string }>
   }
   knowledge: {
     status(): Promise<KnowledgeStatus>
