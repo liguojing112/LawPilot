@@ -8,6 +8,9 @@ import {
   LockOutlined,
   BookOutlined,
   RobotOutlined,
+  CopyOutlined,
+  EditOutlined,
+  CheckOutlined,
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import type { ChatMessage, ConversationRow, RagResult } from '../../shared/types'
@@ -54,6 +57,9 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
   const [showPrivacyConfirm, setShowPrivacyConfirm] = useState(false)
   const [privacyPreview, setPrivacyPreview] = useState<Array<{ original: string; placeholder: string }>>([])
   const [pendingSend, setPendingSend] = useState<{ text: string; convId: string | null } | null>(null)
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
+  const [editingIdx, setEditingIdx] = useState<number | null>(null)
+  const [editText, setEditText] = useState('')
   const listEndRef = useRef<HTMLDivElement>(null)
   const streamBufRef = useRef('')
 
@@ -259,6 +265,36 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
     onClose()
   }
 
+  async function handleCopy(text: string, idx: number) {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedIdx(idx)
+      message.success('已复制')
+      setTimeout(() => setCopiedIdx(null), 2000)
+    } catch {
+      message.error('复制失败')
+    }
+  }
+
+  function handleEditStart(idx: number, text: string) {
+    setEditingIdx(idx)
+    setEditText(text)
+  }
+
+  function handleEditCancel() {
+    setEditingIdx(null)
+    setEditText('')
+  }
+
+  async function handleEditSave(idx: number) {
+    const newMessages = [...messages]
+    newMessages[idx] = { ...newMessages[idx], content: editText }
+    setMessages(newMessages)
+    setEditingIdx(null)
+    setEditText('')
+    message.success('已修改')
+  }
+
   const convOptions = conversations.map((c) => ({
     value: c.id,
     label: c.title || '未命名会话',
@@ -329,20 +365,60 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
                 key={i}
                 className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}
               >
-                <div
-                  style={{
-                    maxWidth: '85%',
-                    padding: '8px 12px',
-                    borderRadius: 10,
-                    background: m.role === 'user' ? '#1677ff' : '#f5f5f5',
-                    color: m.role === 'user' ? '#fff' : 'inherit',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                    fontSize: 13,
-                    lineHeight: 1.7,
-                  }}
-                >
-                  {m.content || (m.role === 'assistant' && streaming ? '' : '（空）')}
+                <div style={{ maxWidth: '85%' }}>
+                  {editingIdx === i ? (
+                    <div>
+                      <Input.TextArea
+                        value={editText}
+                        onChange={(e) => setEditText(e.target.value)}
+                        autoSize={{ minRows: 3, maxRows: 10 }}
+                        style={{ marginBottom: 4 }}
+                      />
+                      <Space size={4}>
+                        <Button size="small" type="primary" onClick={() => handleEditSave(i)}>
+                          <CheckOutlined /> 保存
+                        </Button>
+                        <Button size="small" onClick={handleEditCancel}>取消</Button>
+                      </Space>
+                    </div>
+                  ) : (
+                    <div
+                      style={{
+                        padding: '8px 12px',
+                        borderRadius: 10,
+                        background: m.role === 'user' ? '#1677ff' : '#f5f5f5',
+                        color: m.role === 'user' ? '#fff' : 'inherit',
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word',
+                        fontSize: 13,
+                        lineHeight: 1.7,
+                      }}
+                    >
+                      {m.content || (m.role === 'assistant' && streaming ? '' : '（空）')}
+                    </div>
+                  )}
+                  {m.role === 'assistant' && !streaming && m.content && editingIdx !== i && (
+                    <div className="flex gap-1 mt-1" style={{ opacity: 0.6 }}>
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={copiedIdx === i ? <CheckOutlined /> : <CopyOutlined />}
+                        onClick={() => handleCopy(m.content, i)}
+                        style={{ fontSize: 12, padding: '0 4px', height: 22 }}
+                      >
+                        {copiedIdx === i ? '已复制' : '复制'}
+                      </Button>
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={<EditOutlined />}
+                        onClick={() => handleEditStart(i, m.content)}
+                        style={{ fontSize: 12, padding: '0 4px', height: 22 }}
+                      >
+                        编辑
+                      </Button>
+                    </div>
+                  )}
                 </div>
               </div>
             ))}

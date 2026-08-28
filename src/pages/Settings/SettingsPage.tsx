@@ -362,7 +362,6 @@ export function SettingsPage() {
               style={{ width: 200, marginLeft: 16 }}
               options={[
                 { value: 'standard', label: '标准（身份证/手机号/银行账号/邮箱）' },
-                { value: 'strict', label: '严格（含姓名/公司名/地址）' },
               ]}
             />
           </div>
@@ -375,12 +374,6 @@ export function SettingsPage() {
               <Tag>银行账号</Tag>
               <Tag>电子邮箱</Tag>
               <Tag>统一社会信用代码</Tag>
-              {privacyLevel === 'strict' && (
-                <>
-                  <Tag color="orange">中文姓名</Tag>
-                  <Tag color="orange">地址信息</Tag>
-                </>
-              )}
             </Space>
           </div>
         </div>

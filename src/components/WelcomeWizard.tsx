@@ -274,18 +274,10 @@ export function WelcomeWizard({ onComplete }: Props) {
                 <Text strong className="block mb-2">脱敏级别</Text>
                 <Space>
                   <div
-                    className={`border rounded-lg p-3 cursor-pointer ${privacyLevel === 'standard' ? 'border-blue-400 bg-blue-50' : 'border-gray-200'}`}
-                    onClick={() => setPrivacyLevel('standard')}
+                    className="border rounded-lg p-3 cursor-pointer border-blue-400 bg-blue-50"
                   >
-                    <Radio checked={privacyLevel === 'standard'} className="mr-2" />
+                    <Radio checked className="mr-2" />
                     <span>标准 — 身份证、手机号、银行账号、邮箱</span>
-                  </div>
-                  <div
-                    className={`border rounded-lg p-3 cursor-pointer ${privacyLevel === 'strict' ? 'border-blue-400 bg-blue-50' : 'border-gray-200'}`}
-                    onClick={() => setPrivacyLevel('strict')}
-                  >
-                    <Radio checked={privacyLevel === 'strict'} className="mr-2" />
-                    <span>严格 — 额外含姓名、公司名、地址</span>
                   </div>
                 </Space>
               </div>

@@ -20,12 +20,6 @@ DEFAULT_PATTERNS: dict[str, str] = {
     "统一社会信用代码": r"\b[0-9A-HJ-NPQRTUWXY]{2}\d{6}[0-9A-HJ-NPQRTUWXY]{10}\b",
 }
 
-# 严格模式额外模式
-STRICT_PATTERNS: dict[str, str] = {
-    "中文姓名": r"[\u4e00-\u9fff]{2,4}",
-    "地址": r"(省|市|区|路|街|号|栋|单元|室|楼|层|镇|乡|村|组|弄|巷)",
-}
-
 # 占位符模板
 PLACEHOLDER_TEMPLATE = "[{type}_{index}]"
 
@@ -37,16 +31,13 @@ def mask_text(
 
     Args:
         text: 原始文本
-        level: 脱敏级别 "standard" | "strict"
+        level: 脱敏级别 "standard"
         custom_patterns: 自定义正则模式 {名称: 正则}
 
     Returns:
         { masked_text, mapping, count }
     """
     patterns = dict(DEFAULT_PATTERNS)
-
-    if level == "strict":
-        patterns.update(STRICT_PATTERNS)
 
     if custom_patterns:
         patterns.update(custom_patterns)

@@ -198,7 +198,7 @@ async def rag_ask(req: RagAskRequest):
 
     ctx_parts = []
     for i, s in enumerate(sources):
-        ctx_parts.append(f"[来源{i+1}] ({s['source_type']}, {s.get('title','')}): {s['text'][:500]}")
+        ctx_parts.append(f"[来源{i+1}] ({s['source_type']}, {s.get('title','')}): {s['text'][:2000]}")
     context_text = "\n\n".join(ctx_parts) if ctx_parts else "未找到相关法律资料。"
 
     messages = [

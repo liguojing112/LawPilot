@@ -45,9 +45,18 @@ def _get_model():
         try:
             from sentence_transformers import SentenceTransformer
 
-            _embedding_model = SentenceTransformer(
-                "BAAI/bge-small-zh-v1.5",
-                cache_folder=os.path.join(os.path.dirname(VECTOR_DIR), "models"),
+            # 优先使用本地模型（ModelScope 下载）
+            local_model_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                "data", "models", "models", "BAAI--bge-small-zh-v1.5", "snapshots", "master"
+            )
+
+            if os.path.exists(local_model_path):
+                _embedding_model = SentenceTransformer(local_model_path)
+            else:
+                _embedding_model = SentenceTransformer(
+                    "BAAI/bge-small-zh-v1.5",
+                    cache_folder=os.path.join(os.path.dirname(VECTOR_DIR), "models"),
             )
         except Exception as e:
             raise RuntimeError(f"无法加载嵌入模型: {e}") from e
@@ -134,7 +143,7 @@ def _fetch_materials() -> list[dict]:
             "source_type": "material",
             "source_id": row[0],
             "title": f"{row[1]} ({row[3]})",
-            "text": row[2][:1000],
+            "text": row[2][:4000],
             "law_id": None,
             "article_id": None,
         }
