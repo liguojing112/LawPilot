@@ -124,8 +124,63 @@ def _fetch_law_articles() -> list[dict]:
     ]
 
 
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 100
+
+
+def _split_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
+    """按段落和条款边界智能分块，避免在句子中间截断"""
+    import re
+
+    if len(text) <= chunk_size:
+        return [text]
+
+    # 第一步：按空行/双换行拆成段落
+    paragraphs = re.split(r'\n\s*\n', text)
+
+    chunks = []
+    current = ''
+
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+
+        # 段落本身超过 chunk_size，按条款/句子进一步拆分
+        if len(para) > chunk_size:
+            if current:
+                chunks.append(current.strip())
+                current = ''
+
+            # 按"第X条"、句号、分号等拆分
+            parts = re.split(r'(?=(?:第[一二三四五六七八九十百千零\d]+条[^\S\n]*|[；;。]))', para)
+            for part in parts:
+                part = part.strip()
+                if not part:
+                    continue
+                if len(current) + len(part) + 1 <= chunk_size:
+                    current = (current + '\n' + part).strip() if current else part
+                else:
+                    if current:
+                        chunks.append(current.strip())
+                    current = part
+        else:
+            # 当前段落能放进现有 chunk 就合并
+            if len(current) + len(para) + 1 <= chunk_size:
+                current = (current + '\n\n' + para).strip() if current else para
+            else:
+                if current:
+                    chunks.append(current.strip())
+                current = para
+
+    if current.strip():
+        chunks.append(current.strip())
+
+    return chunks if chunks else [text[:chunk_size]]
+
+
 def _fetch_materials() -> list[dict]:
-    """从 SQLite materials 表读取已完成 OCR 的材料"""
+    """从 SQLite materials 表读取已完成 OCR 的材料，长文本自动分块"""
     db_path = _get_db_path()
     if not db_path:
         return []
@@ -137,18 +192,23 @@ def _fetch_materials() -> list[dict]:
     """).fetchall()
     conn.close()
 
-    return [
-        {
-            "id": f"material:{row[0]}",
-            "source_type": "material",
-            "source_id": row[0],
-            "title": f"{row[1]} ({row[3]})",
-            "text": row[2][:4000],
-            "law_id": None,
-            "article_id": None,
-        }
-        for row in rows
-    ]
+    results = []
+    for row in rows:
+        material_id = row[0]
+        title = f"{row[1]} ({row[3]})"
+        chunks = _split_text(row[2])
+        for i, chunk in enumerate(chunks):
+            suffix = f":chunk{i}" if len(chunks) > 1 else ""
+            results.append({
+                "id": f"material:{material_id}{suffix}",
+                "source_type": "material",
+                "source_id": material_id,
+                "title": title,
+                "text": chunk,
+                "law_id": None,
+                "article_id": None,
+            })
+    return results
 
 
 def rebuild_index() -> dict:
@@ -226,15 +286,15 @@ def rebuild_index() -> dict:
     }
 
 
-def search_similar(query: str, top_k: int = 5) -> list[SearchResult]:
-    """向量语义检索"""
+def search_similar(query: str, top_k: int = 10) -> list[SearchResult]:
+    """混合检索：向量语义 + 关键词过滤"""
+    import re
+
     table = _get_table()
     model = _get_model()
 
-    # 嵌入查询
+    # 向量语义检索
     query_vec = model.encode([query], normalize_embeddings=True, show_progress_bar=False)[0]
-
-    # LanceDB search
     results = (
         table.search(query_vec.tolist())
         .metric("cosine")
@@ -242,6 +302,26 @@ def search_similar(query: str, top_k: int = 5) -> list[SearchResult]:
         .select(["id", "source_type", "title", "text", "law_id", "article_id"])
         .to_list()
     )
+
+    # 如果查询包含"第X条"，额外做关键词精确匹配
+    article_match = re.search(r'第([一二三四五六七八九十百千零\d]+)条', query)
+    if article_match:
+        article_keyword = article_match.group(0)
+        # 扫描全表找包含该关键词的 chunk
+        df = table.to_pandas()
+        keyword_hits = df[df['text'].str.contains(article_keyword, na=False)]
+        existing_ids = {r.get('id') for r in results}
+        for _, row in keyword_hits.iterrows():
+            if row['id'] not in existing_ids:
+                results.append({
+                    'id': row['id'],
+                    'source_type': row['source_type'],
+                    'title': row['title'],
+                    'text': row['text'],
+                    'law_id': row.get('law_id', ''),
+                    'article_id': row.get('article_id', ''),
+                    '_distance': 0.0,
+                })
 
     return [
         SearchResult(

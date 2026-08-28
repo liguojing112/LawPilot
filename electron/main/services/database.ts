@@ -164,9 +164,6 @@ function initializeSchema(db: Database.Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_activities_case ON activities(case_id);
-
-    -- 案件卷宗排序字段（ALTER 兼容已存在的 cases 表）
-    ALTER TABLE cases ADD COLUMN volume_order TEXT;
   `)
 
   // ALTER TABLE ADD COLUMN 在列已存在时会报错，忽略此错误

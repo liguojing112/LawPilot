@@ -189,26 +189,11 @@ async def rag_ask(req: RagAskRequest):
     if not question:
         return {"answer": "请输入问题", "sources": [], "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
 
-    sources = []
-    try:
-        from app.services.embedding_service import search_similar
-        sources = search_similar(question, top_k=req.top_k)
-    except Exception:
-        pass
+    # 使用新 RAG 引擎
+    from app.services.rag_engine import hybrid_search, build_rag_messages, postprocess_citations
 
-    ctx_parts = []
-    for i, s in enumerate(sources):
-        ctx_parts.append(f"[来源{i+1}] ({s['source_type']}, {s.get('title','')}): {s['text'][:2000]}")
-    context_text = "\n\n".join(ctx_parts) if ctx_parts else "未找到相关法律资料。"
-
-    messages = [
-        {"role": "system", "content": (
-            "你是专业法律助手。根据以下资料回答问题。" +
-            "如果资料包含相关信息请在回答中引用[来源N]标注。" +
-            "如果找不到请诚实告知不要编造。\n\n资料:\n" + context_text
-        )},
-        {"role": "user", "content": question},
-    ]
+    chunks = hybrid_search(question, top_k=req.top_k)
+    messages = build_rag_messages(question, chunks)
 
     level = _get_ai_config().get("privacy_level", "standard")
     masked = []
@@ -217,13 +202,18 @@ async def rag_ask(req: RagAskRequest):
         masked.append({**msg, "content": r["masked_text"]})
 
     answer, usage = await _call_llm(masked, 0.3, 8192, return_usage=True)
+
+    # 后处理引用
+    answer = postprocess_citations(answer, chunks)
+
     return {
         "answer": answer,
         "sources": [
             {"id": s.get("id", ""), "source_type": s.get("source_type", ""),
              "title": s.get("title", ""), "snippet": s.get("text", "")[:200],
-             "law_id": s.get("law_id"), "article_id": s.get("article_id")}
-            for s in sources
+             "law_id": s.get("law_id"), "article_id": s.get("article_id"),
+             "score": round(s.get("score", 0), 3)}
+            for s in chunks
         ],
         "usage": usage,
     }
@@ -269,11 +259,11 @@ async def strategy_endpoint(req: StrategyRequest):
     if not req.facts_text.strip():
         return {"error": "请输入案情描述"}
 
-    # 检索法条
+    # 检索法条（使用新 RAG 引擎）
+    from app.services.rag_engine import hybrid_search
     related_laws = []
     try:
-        from app.services.embedding_service import search_similar
-        related_laws = search_similar(req.facts_text, top_k=5)
+        related_laws = hybrid_search(req.facts_text, top_k=5)
     except Exception:
         pass
     laws_text = "\n".join(

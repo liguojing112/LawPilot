@@ -11,6 +11,7 @@ import {
   CopyOutlined,
   EditOutlined,
   CheckOutlined,
+  ReloadOutlined,
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import type { ChatMessage, ConversationRow, RagResult } from '../../shared/types'
@@ -223,7 +224,11 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
       } finally {
         setRagLoading(false)
       }
-      await persist(convId!, finalMessages, estimateTokens(finalMessages[finalMessages.length - 1]?.content || ''))
+      // RAG 模式也要保存
+      const savedMsgs = ragMode
+        ? [...history, { role: 'assistant' as const, content: history[history.length - 1]?.content || '', timestamp: new Date().toISOString() }]
+        : history
+      await persist(activeId!, savedMsgs, estimateTokens(savedMsgs[savedMsgs.length - 1]?.content || ''))
       return
     }
 
@@ -286,13 +291,147 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
     setEditText('')
   }
 
-  async function handleEditSave(idx: number) {
-    const newMessages = [...messages]
-    newMessages[idx] = { ...newMessages[idx], content: editText }
+  async function handleEditSend(idx: number) {
+    if (!editText.trim() || streaming || ragLoading) return
+    // 截断到该用户消息，用修改后的内容重新发送
+    const newMessages = messages.slice(0, idx)
     setMessages(newMessages)
     setEditingIdx(null)
     setEditText('')
-    message.success('已修改')
+    setInput('')
+
+    const userMsg: ChatMessage = { role: 'user', content: editText.trim(), timestamp: new Date().toISOString() }
+    const history = [...newMessages, userMsg]
+    setMessages(history)
+
+    if (ragMode) {
+      setRagLoading(true)
+      let finalMessages: ChatMessage[] = history
+      try {
+        const result = await window.api.ai.ragQuery(editText.trim())
+        const assistantMsg: ChatMessage = {
+          role: 'assistant',
+          content: result.answer,
+          timestamp: new Date().toISOString(),
+        }
+        finalMessages = [...history, assistantMsg]
+        setMessages(finalMessages)
+        if (result.sources && result.sources.length > 0) setRagSources(result)
+      } catch (err) {
+        finalMessages = [
+          ...history,
+          { role: 'assistant', content: `[错误] ${(err as Error).message}`, timestamp: new Date().toISOString() },
+        ]
+        setMessages(finalMessages)
+      } finally {
+        setRagLoading(false)
+      }
+      await persist(activeId!, finalMessages, estimateTokens(finalMessages[finalMessages.length - 1]?.content || ''))
+      return
+    }
+
+    setStreaming(true)
+    streamBufRef.current = ''
+    const unsub = window.api.ai.onStreamChunk((chunk) => {
+      streamBufRef.current += chunk
+      const partial: ChatMessage = {
+        role: 'assistant',
+        content: streamBufRef.current,
+        timestamp: new Date().toISOString(),
+      }
+      setMessages([...history, partial])
+    })
+
+    let finalMessages: ChatMessage[] = history
+    try {
+      const reply = await window.api.ai.chat(activeId!, history.map((m) => ({ role: m.role, content: m.content })))
+      const content = streamBufRef.current || reply
+      finalMessages = [...history, { role: 'assistant', content, timestamp: new Date().toISOString() }]
+      setMessages(finalMessages)
+    } catch (err) {
+      finalMessages = [
+        ...history,
+        { role: 'assistant', content: `[错误] ${(err as Error).message}`, timestamp: new Date().toISOString() },
+      ]
+      setMessages(finalMessages)
+    } finally {
+      unsub()
+      setStreaming(false)
+    }
+    await persist(activeId!, finalMessages, estimateTokens(finalMessages[finalMessages.length - 1]?.content || ''))
+  }
+
+  async function handleRegenerate(idx: number) {
+    if (streaming || ragLoading) return
+    // 找到最后一条用户消息
+    const userMsgIdx = messages.slice(0, idx).reverse().findIndex(m => m.role === 'user')
+    if (userMsgIdx === -1) return
+    const actualUserMsgIdx = idx - 1 - userMsgIdx
+    const userMsg = messages[actualUserMsgIdx]
+    if (!userMsg) return
+
+    // 截断到该用户消息，重新发送
+    const newMessages = messages.slice(0, actualUserMsgIdx + 1)
+    setMessages(newMessages)
+    setInput('')
+    setRagSources(null)
+
+    if (ragMode) {
+      setRagLoading(true)
+      let finalMessages: ChatMessage[] = newMessages
+      try {
+        const result = await window.api.ai.ragQuery(userMsg.content)
+        const assistantMsg: ChatMessage = {
+          role: 'assistant',
+          content: result.answer,
+          timestamp: new Date().toISOString(),
+        }
+        finalMessages = [...newMessages, assistantMsg]
+        setMessages(finalMessages)
+        if (result.sources && result.sources.length > 0) setRagSources(result)
+      } catch (err) {
+        finalMessages = [
+          ...newMessages,
+          { role: 'assistant', content: `[错误] ${(err as Error).message}`, timestamp: new Date().toISOString() },
+        ]
+        setMessages(finalMessages)
+      } finally {
+        setRagLoading(false)
+      }
+      await persist(activeId!, finalMessages, estimateTokens(finalMessages[finalMessages.length - 1]?.content || ''))
+      return
+    }
+
+    // 普通聊天模式
+    setStreaming(true)
+    streamBufRef.current = ''
+    const unsub = window.api.ai.onStreamChunk((chunk) => {
+      streamBufRef.current += chunk
+      const partial: ChatMessage = {
+        role: 'assistant',
+        content: streamBufRef.current,
+        timestamp: new Date().toISOString(),
+      }
+      setMessages([...newMessages, partial])
+    })
+
+    let finalMessages: ChatMessage[] = newMessages
+    try {
+      const reply = await window.api.ai.chat(activeId!, newMessages.map((m) => ({ role: m.role, content: m.content })))
+      const content = streamBufRef.current || reply
+      finalMessages = [...newMessages, { role: 'assistant', content, timestamp: new Date().toISOString() }]
+      setMessages(finalMessages)
+    } catch (err) {
+      finalMessages = [
+        ...newMessages,
+        { role: 'assistant', content: `[错误] ${(err as Error).message}`, timestamp: new Date().toISOString() },
+      ]
+      setMessages(finalMessages)
+    } finally {
+      unsub()
+      setStreaming(false)
+    }
+    await persist(activeId!, finalMessages, estimateTokens(finalMessages[finalMessages.length - 1]?.content || ''))
   }
 
   const convOptions = conversations.map((c) => ({
@@ -373,10 +512,11 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
                         onChange={(e) => setEditText(e.target.value)}
                         autoSize={{ minRows: 3, maxRows: 10 }}
                         style={{ marginBottom: 4 }}
+                        autoFocus
                       />
                       <Space size={4}>
-                        <Button size="small" type="primary" onClick={() => handleEditSave(i)}>
-                          <CheckOutlined /> 保存
+                        <Button size="small" type="primary" onClick={() => handleEditSend(i)}>
+                          <CheckOutlined /> 发送
                         </Button>
                         <Button size="small" onClick={handleEditCancel}>取消</Button>
                       </Space>
@@ -411,11 +551,33 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
                       <Button
                         type="text"
                         size="small"
+                        icon={<ReloadOutlined />}
+                        onClick={() => handleRegenerate(i)}
+                        style={{ fontSize: 12, padding: '0 4px', height: 22 }}
+                      >
+                        重新生成
+                      </Button>
+                    </div>
+                  )}
+                  {m.role === 'user' && editingIdx !== i && !streaming && !ragLoading && (
+                    <div className="flex gap-1 mt-1" style={{ opacity: 0.6 }}>
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={copiedIdx === i ? <CheckOutlined /> : <CopyOutlined />}
+                        onClick={() => handleCopy(m.content, i)}
+                        style={{ fontSize: 12, padding: '0 4px', height: 22 }}
+                      >
+                        {copiedIdx === i ? '已复制' : '复制'}
+                      </Button>
+                      <Button
+                        type="text"
+                        size="small"
                         icon={<EditOutlined />}
                         onClick={() => handleEditStart(i, m.content)}
                         style={{ fontSize: 12, padding: '0 4px', height: 22 }}
                       >
-                        编辑
+                        修改
                       </Button>
                     </div>
                   )}
