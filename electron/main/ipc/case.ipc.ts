@@ -173,6 +173,36 @@ export function registerCaseIpc(): void {
     }
     const font = chineseFont || 'helvetica'
 
+    // 计页：预估每份材料所占领的 PDF 页数（用于目录页码）
+    // 文本按 splitTextToSize 算行数 → 页数；图片固定 1 页；无内容 1 页
+    function estimateMaterialPages(m: typeof sorted[number]): number {
+      if (m.raw_text) {
+        const lines = doc.splitTextToSize(m.raw_text, 170) as string[]
+        const perPage = Math.floor(260 / 5) // 每页约52行
+        const totalLines = lines.length + (m.proof_purpose || m.evidence_no ? 2 : 0)
+        return Math.max(1, Math.ceil(totalLines / perPage))
+      }
+      if ((m.mime_type === 'image/png' || m.mime_type === 'image/jpeg') && fs.existsSync(m.stored_path)) {
+        return 1
+      }
+      return 1
+    }
+
+    // 计算每份材料的分隔页起始页码（分隔页 = 每份材料前单独一页，标名称+页码）
+    // 卷宗页码从封面的下一页开始计：封面(1) → 目录(?页) → 分隔页/正文
+    // 此处按"分隔页+正文页"累加，页码从 1 开始（对应生成后的绝对页号由程序自行分页）
+    const pageOffsets: number[] = []
+    let acc = 1 // 第1份材料的分隔页
+    sorted.forEach((m, i) => {
+      if (i === 0) {
+        pageOffsets.push(acc)
+        acc += 1 + estimateMaterialPages(m)
+      } else {
+        pageOffsets.push(acc)
+        acc += 1 + estimateMaterialPages(m)
+      }
+    })
+
     // 封面
     doc.setFont(font, 'bold')
     doc.setFontSize(22)
@@ -181,18 +211,20 @@ export function registerCaseIpc(): void {
     doc.setFontSize(12)
     const info = [
       ['案号', c.case_number || '-'],
-      ['案由', c.title],
-      ['管辖法院', c.court || '-'],
+      ['案由', c.title || '-'],
       ['委托人', c.client || '-'],
+      ['对方当事人', c.opponent || '-'],
+      ['管辖法院', c.court || '-'],
       ['立案日期', c.filing_date || '-'],
       ['材料数量', `${materials.length} 份`],
       ['生成日期', new Date().toLocaleString('zh-CN')],
     ]
+    const coverTop = 80
     info.forEach(([label, value], i) => {
-      doc.text(`${label}：${value}`, 30, 90 + i * 12)
+      doc.text(`${label}：${value}`, 30, coverTop + i * 14)
     })
 
-    // 目录（分页）
+    // 目录（分页）：带页码列
     doc.addPage()
     doc.setFont(font, 'bold')
     doc.setFontSize(14)
@@ -201,31 +233,73 @@ export function registerCaseIpc(): void {
     doc.setFontSize(11)
     let y = 35
     sorted.forEach((m, i) => {
-      if (y > 285) {
+      if (y > 272) {
         doc.addPage()
         y = 25
       }
-      doc.text(`${i + 1}. [${m.category}] ${m.original_name}`, 20, y)
-      y += 8
+      const label = m.evidence_no
+        ? m.evidence_no
+        : `材料${i + 1}`
+      // 序号 + 名称 + 页码
+      doc.text(`${i + 1}. ${label} [${m.category}] ${m.original_name}`, 20, y)
+      doc.text(String(pageOffsets[i]), 185, y, { align: 'right' })
+      y += 6
+      // 证明目的（若有）
+      if (m.proof_purpose) {
+        doc.setFontSize(9)
+        doc.setTextColor(100)
+        doc.text(`　证明目的：${m.proof_purpose}`, 24, y)
+        doc.setFontSize(11)
+        doc.setTextColor(0)
+        y += 6
+      }
+      y += 2
     })
 
-    // 材料正文
-    for (const m of sorted) {
+    // 页脚：在页面底部居中显示页码
+    function foot(pn: number) {
+      doc.setFont(font, 'normal')
+      doc.setFontSize(9)
+      doc.setTextColor(140)
+      doc.text(`第 ${pn} 页`, 105, 292, { align: 'center' })
+      doc.setTextColor(0)
+    }
+
+    // 材料正文（每份材料前加分隔页，标明名称+页码）
+    sorted.forEach((m, i) => {
+      const label = m.evidence_no ? m.evidence_no : `材料${i + 1}`
+      const startPage = pageOffsets[i] // 分隔页页码
+
+      // 分隔页 / 标题页：名称居中，页码放底部页脚
       doc.addPage()
       doc.setFont(font, 'bold')
+      doc.setFontSize(18)
+      doc.text(`${label}　${m.original_name}`, 105, 90, { align: 'center' })
+      foot(startPage)
+
+      // 正文内容页
+      doc.addPage()
+      let pn = startPage + 1
+      doc.setFont(font, 'bold')
       doc.setFontSize(14)
-      doc.text(m.original_name, 20, 20)
+      doc.text(`${label ? label + '　' : ''}${m.original_name}`, 20, 20)
       doc.setFont(font, 'normal')
       doc.setFontSize(10)
       doc.text(`分类：${m.category}`, 20, 28)
+      if (m.proof_purpose) {
+        doc.setTextColor(80)
+        doc.text(`证明目的：${m.proof_purpose}`, 20, 34)
+        doc.setTextColor(0)
+      }
 
       if (m.raw_text) {
-        const lines = doc.splitTextToSize(m.raw_text, 170)
-        // 手动分页：超出页面底部就换页（jsPDF 4.x 无 autoPage）
-        let y = 40
+        const lines = doc.splitTextToSize(m.raw_text, 170) as string[]
+        let y = m.proof_purpose ? 46 : 40
         for (const line of lines) {
           if (y > 280) {
+            foot(pn)
             doc.addPage()
+            pn++
             y = 20
           }
           doc.text(line, 20, y)
@@ -235,7 +309,6 @@ export function registerCaseIpc(): void {
         (m.mime_type === 'image/png' || m.mime_type === 'image/jpeg') &&
         fs.existsSync(m.stored_path)
       ) {
-        // 图片材料：嵌入 PDF 页
         try {
           const base64 = fs.readFileSync(m.stored_path).toString('base64')
           const format = m.mime_type === 'image/png' ? 'PNG' : 'JPEG'
@@ -243,14 +316,15 @@ export function registerCaseIpc(): void {
           const scale = Math.min(170 / props.width, 250 / props.height, 1)
           const w = props.width * scale
           const h = props.height * scale
-          doc.addImage(base64, format, (210 - w) / 2, 35, w, h)
+          doc.addImage(base64, format, (210 - w) / 2, 40, w, h)
         } catch (imgErr) {
           doc.text(`（${m.original_name}：图片嵌入失败）`, 20, 40)
         }
       } else {
         doc.text(`（${m.original_name}：无文本内容）`, 20, 40)
       }
-    }
+      foot(pn) // 正文最后一页的页脚
+    })
 
     const buffer = Buffer.from(doc.output('arraybuffer'))
     // Windows 文件锁：目标文件正被其他程序（如 PDF 阅读器）打开时写入会报 EBUSY，
