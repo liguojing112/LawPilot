@@ -302,6 +302,59 @@ async def strategy_endpoint(req: StrategyRequest):
     return parsed
 
 
+def _clean_list(items, kind):
+    """清洗 AI 返回的实体列表，剔除推理残留/元语言/空值"""
+    import re
+
+    cleaned = []
+    seen = set()
+    # 明确禁止的脏字符/词
+    junk_markers = ['[]', '{}', '可能', '大概', '应该', '也许是', '不确定',
+                    '无。', '（不', '(不', '无）', '这是', '是机构', '标注']
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        s = item.strip()
+        # 去包裹引号（保留案号的括号结构）
+        s = s.strip('"\'\'\u300c\u300d\u3010\u3011「」')
+        # 仅去掉成对的方括号/花括号括号（剥掉散落的 [] 符号不是合法实体）
+        s = re.sub(r'^[\[\]{}]+|[\[\]{}]+$', '', s)
+        s = re.sub(r'[【】]', '', s)
+        s = re.sub(r'[:：,，、;；。]+$', '', s)
+        if not s:
+            continue
+        if any(j in s for j in junk_markers):
+            continue
+        # 含空格分隔的多段推理文本（如: 可能"国务院 是机构"）剔除
+        if s.count(' ') + s.count('\u00a0') >= 2:
+            continue
+        # 按类型校验
+        if kind == 'person':
+            if len(s) < 2 or not re.match(r'^[\u4e00-\u9fa5]{2,4}$', s):
+                continue
+            # 排除通用称谓
+            if s in {'原告', '被告', '第三人', '申请人', '被申请人', '上诉人', '被上诉人'}:
+                continue
+        elif kind == 'org':
+            if len(s) < 4 or not re.match(r'^[\u4e00-\u9fa5A-Za-z]{4,20}$', s):
+                continue
+        elif kind == 'date':
+            if not re.match(r'^\d{4}年\d{1,2}月\d{1,2}日$', s):
+                continue
+        elif kind == 'amount':
+            if not re.match(r'^\d[\d,.]*\s*(?:亿|万|千|百)?\s*元$', s):
+                continue
+        elif kind == 'case':
+            if not re.search(r'[（(]\s*\d{4}', s):
+                continue
+        # 去重
+        key = s
+        if key not in seen:
+            seen.add(key)
+            cleaned.append(s)
+    return cleaned[:20]
+
+
 def _friendly_error(e: Exception) -> str:
     """将 OpenAI SDK 的原始异常翻译为用户友好的中文提示"""
     msg = str(e)
@@ -413,11 +466,11 @@ async def extract_entities_endpoint(req: ExtractEntitiesRequest):
         parsed = json.loads(raw)
         return {
             "ok": True,
-            "persons": parsed.get("persons", []),
-            "orgs": parsed.get("orgs", []),
-            "dates": parsed.get("dates", []),
-            "amounts": parsed.get("amounts", []),
-            "caseNumbers": parsed.get("caseNumbers", []),
+            "persons": _clean_list(parsed.get("persons", []), "person"),
+            "orgs": _clean_list(parsed.get("orgs", []), "org"),
+            "dates": _clean_list(parsed.get("dates", []), "date"),
+            "amounts": _clean_list(parsed.get("amounts", []), "amount"),
+            "caseNumbers": _clean_list(parsed.get("caseNumbers", []), "case"),
             "message": "",
         }
     except json.JSONDecodeError:
