@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import {
   IPC_CHANNELS,
   type LawPilotAPI,
@@ -69,6 +69,8 @@ const api: LawPilotAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.MATERIAL_DELETE, id),
     updateOrder: (caseId: string, orderedIds: string[]) =>
       ipcRenderer.invoke(IPC_CHANNELS.MATERIAL_UPDATE_ORDER, caseId, orderedIds),
+    updateEvidence: (materialId: string, evidenceNo: string, proofPurpose: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.MATERIAL_UPDATE_EVIDENCE, materialId, evidenceNo, proofPurpose),
     onProcessed: (callback: (data: {
       materialId: string
       status: string
@@ -123,6 +125,7 @@ const api: LawPilotAPI = {
     select: (options) => ipcRenderer.invoke(IPC_CHANNELS.FILE_SELECT, options),
     getInfo: (filePath: string) => ipcRenderer.invoke(IPC_CHANNELS.FILE_GET_INFO, filePath),
     readImage: (filePath: string) => ipcRenderer.invoke(IPC_CHANNELS.FILE_READ_IMAGE, filePath),
+    getPathForFile: (file: File) => webUtils.getPathForFile(file),
   },
 }
 

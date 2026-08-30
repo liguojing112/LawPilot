@@ -10,6 +10,7 @@ import {
   linkMaterialToCase,
   updateMaterialOcr,
   updateMaterialCategory,
+  updateMaterialEvidence,
   deleteMaterial,
   createActivity,
   getCaseById,
@@ -237,6 +238,22 @@ export function registerMaterialIpc(): void {
     (_event, caseId: string, orderedIds: string[]) => {
       updateCase(caseId, { volume_order: JSON.stringify(orderedIds) })
       createActivity(caseId, 'volume_reordered', `调整了卷宗材料排序（${orderedIds.length} 份材料）`)
+    }
+  )
+
+  // ---- 更新材料证据编号与证明目的 ----
+  ipcMain.handle(
+    IPC_CHANNELS.MATERIAL_UPDATE_EVIDENCE,
+    (_event, materialId: string, evidenceNo: string, proofPurpose: string) => {
+      const material = getMaterialById(materialId)
+      updateMaterialEvidence(materialId, evidenceNo || '', proofPurpose || '')
+      if (material?.case_id) {
+        createActivity(
+          material.case_id,
+          'evidence_updated',
+          `更新了材料"${material.original_name}"的证据信息（编号：${evidenceNo || '-'}）`
+        )
+      }
     }
   )
 }

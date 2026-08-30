@@ -122,6 +122,7 @@ function initializeSchema(db: Database.Database): void {
       case_status TEXT NOT NULL DEFAULT 'active',
       court TEXT,
       client TEXT,
+      opponent TEXT,
       filing_date TEXT,
       description TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -147,6 +148,8 @@ function initializeSchema(db: Database.Database): void {
       category TEXT DEFAULT '其他',
       category_confidence REAL DEFAULT 0,
       page_count INTEGER DEFAULT 1,
+      evidence_no TEXT DEFAULT '',
+      proof_purpose TEXT DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -175,6 +178,24 @@ function initializeSchema(db: Database.Database): void {
 
   try {
     db.exec(`ALTER TABLE cases ADD COLUMN client TEXT`)
+  } catch {
+    // 列已存在，忽略
+  }
+
+  try {
+    db.exec(`ALTER TABLE cases ADD COLUMN opponent TEXT`)
+  } catch {
+    // 列已存在，忽略
+  }
+
+  try {
+    db.exec(`ALTER TABLE materials ADD COLUMN evidence_no TEXT DEFAULT ''`)
+  } catch {
+    // 列已存在，忽略
+  }
+
+  try {
+    db.exec(`ALTER TABLE materials ADD COLUMN proof_purpose TEXT DEFAULT ''`)
   } catch {
     // 列已存在，忽略
   }
@@ -483,49 +504,21 @@ export interface SearchResultRow {
   snippet: string
 }
 
-/** FTS5 全文检索，空结果时自动降级为 LIKE 搜索（解决中文分词问题） */
+/** 全文检索：LIKE 子串匹配为主（中文可靠），FTS5 辅助排序，合并去重 */
 export function searchArticles(query: string, limit = 50): SearchResultRow[] {
   const db = getDatabase()
+  const raw = query.trim()
+  if (!raw) return []
 
-  // 处理查询字符串：空格分隔 → 各词加 * 前缀匹配 → AND 连接
-  const terms = query
-    .trim()
-    .split(/\s+/)
-    .filter((t) => t.length > 0)
-    .map((t) => `"${t}"*`)
-    .join(' AND ')
-
-  if (!terms) return []
-
-  // 1. 优先尝试 FTS5 全文检索
-  let ftsResults: SearchResultRow[] = []
-  try {
-    ftsResults = db
-      .prepare(
-        `SELECT
-          a.id, a.law_id, a.article_num, a.content,
-          l.title AS law_title,
-          snippet(articles_fts, 2, '<mark>', '</mark>', '...', 40) AS snippet
-        FROM articles_fts f
-        JOIN articles a ON f.rowid = a.rowid
-        JOIN laws l ON a.law_id = l.id
-        WHERE articles_fts MATCH @query
-        ORDER BY rank
-        LIMIT @limit`
-      )
-      .all({ query: terms, limit }) as SearchResultRow[]
-  } catch {
-    // FTS5 语法错误，继续走 LIKE
+  let keywordParams: string[] = []
+  let keywords: string[] = []
+  if (raw.includes(' ')) {
+    keywords = raw.split(/\s+/).filter(Boolean)
+  } else {
+    keywords = [raw]
   }
 
-  // 2. FTS5 有结果（含中文分词匹配），直接返回
-  if (ftsResults.length > 0) return ftsResults
-
-  // 3. FTS5 无结果或出错 → 降级为 LIKE 搜索
-  const keywords = query.trim().split(/\s+/).filter((k) => k.length > 0)
-  if (keywords.length === 0) return []
-
-  // 用 AND 拼接多个 LIKE 条件（多关键词时提高精度）
+  // ---- 1. LIKE 主检索：多关键词 AND，提升精度 ----
   const likeParts = keywords.map(() => '(a.content LIKE ? OR a.title LIKE ? OR a.article_num LIKE ?)')
   const likeSql = likeParts.join(' AND ')
   const likeParams: string[] = []
@@ -534,21 +527,35 @@ export function searchArticles(query: string, limit = 50): SearchResultRow[] {
     likeParams.push(p, p, p)
   }
 
-  const rows = db
-    .prepare(
-      `SELECT a.id, a.law_id, a.article_num, a.content,
-              l.title AS law_title, substr(a.content, 1, 120) AS snippet
-       FROM articles a JOIN laws l ON a.law_id = l.id
-       WHERE ${likeSql}
-       ORDER BY l.title, a.order_num
-       LIMIT ?`
-    )
-    .all(...likeParams, limit) as SearchResultRow[]
+  let likeRows: SearchResultRow[]
+  try {
+    likeRows = db
+      .prepare(
+        `SELECT a.id, a.law_id, a.article_num, a.content,
+                l.title AS law_title, substr(a.content, 1, 120) AS snippet
+         FROM articles a JOIN laws l ON a.law_id = l.id
+         WHERE ${likeSql}
+         ORDER BY l.title, a.order_num
+         LIMIT ?`
+      )
+      .all(...likeParams, limit) as SearchResultRow[]
+  } catch {
+    likeRows = []
+  }
 
-  // 多关键词 AND 无结果时，降级为整体 OR 匹配
-  if (rows.length === 0 && keywords.length > 1) {
-    const pattern = `%${query.trim()}%`
-    return db
+  const seen = new Set<string>()
+  const merged: SearchResultRow[] = []
+  for (const r of likeRows) {
+    if (!seen.has(r.id)) {
+      seen.add(r.id)
+      merged.push(r)
+    }
+  }
+
+  // 多关键词 AND 无结果 → 降级为整句 OR 匹配（混合中英"民法典 第681条"）
+  if (merged.length === 0) {
+    const pattern = `%${raw}%`
+    const rows = db
       .prepare(
         `SELECT a.id, a.law_id, a.article_num, a.content,
                 l.title AS law_title, substr(a.content, 1, 120) AS snippet
@@ -558,9 +565,82 @@ export function searchArticles(query: string, limit = 50): SearchResultRow[] {
          LIMIT ?`
       )
       .all(pattern, pattern, pattern, limit) as SearchResultRow[]
+    for (const r of rows) {
+      if (!seen.has(r.id)) {
+        seen.add(r.id)
+        merged.push(r)
+      }
+    }
   }
 
-  return rows
+  // ---- 2. FTS5 辅助：仅当 LIKE 结果不足时补充候选 ----
+  // 注意：FTS5 默认 tokenizer 对中文整句分词效果差，仅作为补充
+  if (merged.length < limit) {
+    try {
+      // 把整句转成语义 token（非空格分隔则逐字拆分为 2-gram 提升中文召回）
+      const ftsQuery = buildFtsQuery(raw)
+      if (ftsQuery) {
+        const ftsRows = db
+          .prepare(
+            `SELECT
+              a.id, a.law_id, a.article_num, a.content,
+              l.title AS law_title,
+              snippet(articles_fts, 2, '<mark>', '</mark>', '...', 40) AS snippet
+            FROM articles_fts f
+            JOIN articles a ON f.rowid = a.rowid
+            JOIN laws l ON a.law_id = l.id
+            WHERE articles_fts MATCH @query
+            ORDER BY rank
+            LIMIT @limit`
+          )
+          .all({ query: ftsQuery, limit }) as SearchResultRow[]
+        for (const r of ftsRows) {
+          if (!seen.has(r.id)) {
+            seen.add(r.id)
+            merged.push(r)
+          }
+        }
+      }
+    } catch {
+      // FTS5 语法错误，忽略（LIKE 结果已足够）
+    }
+  }
+
+  return merged.slice(0, limit)
+}
+
+/**
+ * 构造 FTS5 MATCH 查询。
+ * 对中文（无空格）整句先做 2-gram 拆分，提升 tokenizer 召回；
+ * 效果有限但可补充 LIKE 未覆盖的变体。
+ */
+function buildFtsQuery(raw: string): string | null {
+  const t = raw.trim().replace(/\s+/g, ' ')
+  if (!t) return null
+
+  // 含空格：各词独立 AND（词可能是中文，tokenizer 对单词长串可能无命中）
+  if (t.includes(' ')) {
+    const parts = t
+      .split(' ')
+      .filter(Boolean)
+      .map((w) => `"${w}"*`)
+      .join(' AND ')
+    return parts || null
+  }
+
+  // 纯中文字符串：拆 2-gram 提升召回（如"合同的订立" → "合同" "同的" "的订" "订立"）
+  if (/[\u4e00-\u9fa5]/.test(t) && t.length >= 2) {
+    const grams: string[] = []
+    for (let i = 0; i < t.length - 1; i++) {
+      const g = t.slice(i, i + 2)
+      if (/[\u4e00-\u9fa5]/.test(g)) grams.push(`"${g}"`)
+    }
+    // 2-gram 之间用 OR，避免 AND 过严导致零命中
+    return grams.length > 0 ? grams.join(' OR ') : null
+  }
+
+  // 英文/数字：前缀匹配
+  return `"${t}"*`
 }
 
 /** 根据 articleId 获取条款所在法规的条款列表（用于定位跳转） */
@@ -612,14 +692,15 @@ export function createCase(data: {
   case_type: string
   court?: string
   client?: string
+  opponent?: string
   filing_date?: string
   description?: string
 }): CaseRow {
   const db = getDatabase()
   const id = uuidv4()
   db.prepare(
-    `INSERT INTO cases (id, case_number, title, case_type, court, client, filing_date, description)
-     VALUES (@id, @case_number, @title, @case_type, @court, @client, @filing_date, @description)`
+    `INSERT INTO cases (id, case_number, title, case_type, court, client, opponent, filing_date, description)
+     VALUES (@id, @case_number, @title, @case_type, @court, @client, @opponent, @filing_date, @description)`
   ).run({
     id,
     case_number: data.case_number || null,
@@ -627,6 +708,7 @@ export function createCase(data: {
     case_type: data.case_type,
     court: data.court || null,
     client: data.client || null,
+    opponent: data.opponent || null,
     filing_date: data.filing_date || null,
     description: data.description || null,
   })
@@ -677,6 +759,7 @@ export function updateCase(
     case_status?: string
     court?: string
     client?: string
+    opponent?: string
     filing_date?: string
     description?: string
     volume_order?: string
@@ -810,6 +893,18 @@ export function updateMaterialCategory(
   db.prepare(
     'UPDATE materials SET category = ?, category_confidence = ? WHERE id = ?'
   ).run(category, confidence, id)
+}
+
+/** 更新材料的证据编号与证明目的（用于卷宗归档证据清单） */
+export function updateMaterialEvidence(
+  id: string,
+  evidenceNo: string,
+  proofPurpose: string
+): void {
+  const db = getDatabase()
+  db.prepare(
+    'UPDATE materials SET evidence_no = ?, proof_purpose = ? WHERE id = ?'
+  ).run(evidenceNo, proofPurpose, id)
 }
 
 export function deleteMaterial(id: string): void {

@@ -73,6 +73,7 @@ export const IPC_CHANNELS = {
   MATERIAL_LINK_CASE: 'material:link-case',
   MATERIAL_CLASSIFY: 'material:classify',
   MATERIAL_UPDATE_ORDER: 'material:update-order',
+  MATERIAL_UPDATE_EVIDENCE: 'material:update-evidence',
   MATERIAL_LATEST: 'material:latest',
   MATERIAL_DELETE: 'material:delete',
 } as const
@@ -199,6 +200,8 @@ export interface MaterialRow {
   category: string
   category_confidence: number
   page_count: number
+  evidence_no?: string
+  proof_purpose?: string
   created_at: string
 }
 
@@ -245,6 +248,7 @@ export interface CaseInfo {
   case_status: string
   court: string
   client: string
+  opponent: string
   filing_date: string
   description: string
   volume_order: string | null
@@ -391,6 +395,7 @@ export interface LawPilotAPI {
     latest(limit?: number): Promise<MaterialRow[]>
     delete(id: string): Promise<void>
     updateOrder(caseId: string, orderedIds: string[]): Promise<void>
+    updateEvidence(materialId: string, evidenceNo: string, proofPurpose: string): Promise<void>
     onProcessed(callback: (data: { materialId: string; status: string; category?: string; error?: string; suggestedCaseNumber?: string }) => void): () => void
   }
   ai: {
@@ -415,5 +420,6 @@ export interface LawPilotAPI {
     select(options?: { filters?: { name: string; extensions: string[] }[] }): Promise<string[] | null>
     getInfo(filePath: string): Promise<{ name: string; size: number; hash: string }>
     readImage(filePath: string): Promise<string | null>
+    getPathForFile(file: File): string
   }
 }
