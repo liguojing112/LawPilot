@@ -65,6 +65,9 @@ export function CaseDetail() {
   const [editSaving, setEditSaving] = useState(false)
   const [editForm] = Form.useForm()
   const [preview, setPreview] = useState<{ material: MaterialRow; image?: string } | null>(null)
+  const [evidenceEdit, setEvidenceEdit] = useState<MaterialRow | null>(null)
+  const [evidenceSaving, setEvidenceSaving] = useState(false)
+  const [evidenceForm] = Form.useForm()
 
   useEffect(() => {
     if (!id) return
@@ -154,6 +157,36 @@ export function CaseDetail() {
     }
   }
 
+  // ---- 证据编号/证明目的编辑 ----
+  function openEvidenceEdit(material: MaterialRow): void {
+    setEvidenceEdit(material)
+    evidenceForm.setFieldsValue({
+      evidence_no: material.evidence_no || '',
+      proof_purpose: material.proof_purpose || '',
+    })
+  }
+
+  async function handleEvidenceSave(): Promise<void> {
+    if (!evidenceEdit) return
+    try {
+      const values = await evidenceForm.validateFields()
+      setEvidenceSaving(true)
+      await window.api.material.updateEvidence(
+        evidenceEdit.id,
+        values.evidence_no || '',
+        values.proof_purpose || ''
+      )
+      message.success('证据信息已保存')
+      setEvidenceEdit(null)
+      loadData()
+    } catch (err) {
+      if (err && typeof err === 'object' && 'errorFields' in err) return
+      message.error(`保存失败: ${(err as Error).message}`)
+    } finally {
+      setEvidenceSaving(false)
+    }
+  }
+
   function openEdit(): void {
     if (!caseInfo) return
     editForm.setFieldsValue({
@@ -163,6 +196,7 @@ export function CaseDetail() {
       case_status: caseInfo.case_status,
       court: caseInfo.court,
       client: caseInfo.client,
+      opponent: caseInfo.opponent,
       filing_date: caseInfo.filing_date ? dayjs(caseInfo.filing_date) : undefined,
       description: caseInfo.description,
     })
@@ -251,6 +285,14 @@ export function CaseDetail() {
                         </Button>
                       ),
                       <Button
+                        key="evidence"
+                        type="link"
+                        size="small"
+                        onClick={() => openEvidenceEdit(item)}
+                      >
+                        编辑证据
+                      </Button>,
+                      <Button
                         key="unlink"
                         type="link"
                         danger
@@ -297,6 +339,14 @@ export function CaseDetail() {
                               ? `${(item.file_size / 1024).toFixed(1)} KB · ${formatDateTime(item.created_at)}`
                               : formatDateTime(item.created_at)}
                           </div>
+                          {(item.evidence_no || item.proof_purpose) && (
+                            <div className="mt-1" style={{ fontSize: 12 }}>
+                              <Text type="secondary">
+                                {item.evidence_no ? item.evidence_no : ''}
+                                {item.proof_purpose ? ` — 证明：${item.proof_purpose}` : ''}
+                              </Text>
+                            </div>
+                          )}
                           {item.raw_text && (
                             <div>
                               <EntityTags
@@ -408,6 +458,7 @@ export function CaseDetail() {
           </Descriptions.Item>
           <Descriptions.Item label="管辖法院">{caseInfo.court || '-'}</Descriptions.Item>
           <Descriptions.Item label="委托人">{caseInfo.client || '-'}</Descriptions.Item>
+          <Descriptions.Item label="对方当事人">{caseInfo.opponent || '-'}</Descriptions.Item>
           <Descriptions.Item label="立案日期">{caseInfo.filing_date || '-'}</Descriptions.Item>
           <Descriptions.Item label="创建时间">
             {formatDateTime(caseInfo.created_at)}
@@ -481,12 +532,35 @@ export function CaseDetail() {
             <Input placeholder="委托人姓名或单位名称（可选）" />
           </Form.Item>
 
+          <Form.Item name="opponent" label="对方当事人">
+            <Input placeholder="对方当事人姓名或单位名称（可选）" />
+          </Form.Item>
+
           <Form.Item name="filing_date" label="立案日期">
             <DatePicker style={{ width: '100%' }} placeholder="选择日期" />
           </Form.Item>
 
           <Form.Item name="description" label="案情描述">
             <Input.TextArea rows={3} placeholder="简要案情描述（可选）" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="编辑证据信息"
+        open={!!evidenceEdit}
+        onOk={handleEvidenceSave}
+        onCancel={() => setEvidenceEdit(null)}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={evidenceSaving}
+      >
+        <Form form={evidenceForm} layout="vertical">
+          <Form.Item name="evidence_no" label="证据编号">
+            <Input placeholder="如：证据一 / 证据1 / E-01" />
+          </Form.Item>
+          <Form.Item name="proof_purpose" label="证明目的">
+            <Input.TextArea rows={3} placeholder="说明该材料要证明的事实，如：证明借贷关系成立" />
           </Form.Item>
         </Form>
       </Modal>
