@@ -467,31 +467,32 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
         </Space>
       }
     >
-      {/* 会话管理 */}
-      <div className="flex items-center gap-2 mb-3">
-        <Select
-          className="flex-1"
-          size="small"
-          placeholder="选择历史会话"
-          allowClear
-          value={activeId}
-          onChange={(v) => setActiveId(v ?? null)}
-          options={convOptions}
-          disabled={streaming || ragLoading}
-          status={conversations.length === 0 ? undefined : 'success'}
-        />
-        <Button size="small" icon={<PlusOutlined />} onClick={handleNewConversation} disabled={streaming || ragLoading}>
-          新建
-        </Button>
-        {activeId && (
-          <Popconfirm title="删除该会话？" onConfirm={() => handleDeleteConversation(activeId)}>
-            <Button size="small" danger icon={<DeleteOutlined />} disabled={streaming || ragLoading} />
-          </Popconfirm>
-        )}
-      </div>
+      <div className="flex flex-col" style={{ height: 'calc(100vh - 100px)' }}>
+        {/* 会话管理 - 固定顶部 */}
+        <div className="flex items-center gap-2 mb-3 flex-shrink-0">
+          <Select
+            className="flex-1"
+            size="small"
+            placeholder="选择历史会话"
+            allowClear
+            value={activeId}
+            onChange={(v) => setActiveId(v ?? null)}
+            options={convOptions}
+            disabled={streaming || ragLoading}
+            status={conversations.length === 0 ? undefined : 'success'}
+          />
+          <Button size="small" icon={<PlusOutlined />} onClick={handleNewConversation} disabled={streaming || ragLoading}>
+            新建
+          </Button>
+          {activeId && (
+            <Popconfirm title="删除该会话？" onConfirm={() => handleDeleteConversation(activeId)}>
+              <Button size="small" danger icon={<DeleteOutlined />} disabled={streaming || ragLoading} />
+            </Popconfirm>
+          )}
+        </div>
 
-      {/* 消息流 */}
-      <div className="flex-1 overflow-auto" style={{ minHeight: 240 }}>
+        {/* 消息流 - 可滚动 */}
+        <div className="flex-1 overflow-auto" style={{ minHeight: 0 }}>
         {messages.length === 0 && !ragLoading ? (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -675,8 +676,8 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
         </div>
       </Modal>
 
-      {/* 输入区 */}
-      <div className="mt-3 flex items-end gap-2">
+      {/* 输入区 - 固定底部 */}
+      <div className="mt-3 flex items-end gap-2 flex-shrink-0">
         <Input.TextArea
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -698,6 +699,7 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
         >
           发送
         </Button>
+      </div>
       </div>
     </Drawer>
   )
