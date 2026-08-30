@@ -9,7 +9,8 @@ dependencies = [
     "pydantic>=2.8.0",
     "python-multipart>=0.0.9",
     "paddleocr>=2.8.0",
-    "paddlepaddle>=3.0.0",
+    # 3.3.x oneDNN+PIR 有已知回归 bug（PaddlePaddle/Paddle#77340），锁在 3.2.x
+    "paddlepaddle>=3.0.0,<3.3",
     "pdfplumber>=0.11.0",
     "python-docx>=1.1.0",
     "sentence-transformers>=3.0.0",

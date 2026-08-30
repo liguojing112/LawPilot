@@ -17,22 +17,44 @@ class ExtractResponse(BaseModel):
     page_count: int = 1
 
 
+def _flatten_ocr_texts(result) -> list[str]:
+    """兼容 PaddleOCR 2.x（[poly, (text, score)]）与 3.x（dict 含 rec_texts）返回结构"""
+    texts: list[str] = []
+
+    def _extract(item):
+        if isinstance(item, dict):
+            for t in item.get("rec_texts", []):
+                texts.append(str(t))
+        elif isinstance(item, (list, tuple)):
+            for line in item:
+                if isinstance(line, (list, tuple)) and len(line) >= 2:
+                    t = line[1][0] if isinstance(line[1], (list, tuple)) else str(line[1])
+                    texts.append(t)
+
+    if isinstance(result, dict):
+        _extract(result)
+    elif isinstance(result, (list, tuple)):
+        for item in result:
+            _extract(item)
+    return texts
+
+
 def _extract_image(file_path: str) -> tuple[str, int]:
     """使用 PaddleOCR 提取图片文本"""
     try:
         from paddleocr import PaddleOCR
 
-        ocr = PaddleOCR(lang="ch", show_log=False)
-        result = ocr.ocr(file_path)
-        if not result or not result[0]:
-            return "", 1
+        try:
+            ocr = PaddleOCR(lang="ch")
+        except TypeError:
+            ocr = PaddleOCR(lang="ch", show_log=False)
 
-        lines = []
-        for line in result[0]:
-            if line and len(line) >= 2:
-                text = line[1][0] if isinstance(line[1], (list, tuple)) else str(line[1])
-                lines.append(text)
-        return "\n".join(lines), 1
+        try:
+            result = ocr.ocr(file_path)
+        except (AttributeError, TypeError):
+            result = ocr.predict(file_path)
+
+        return "\n".join(_flatten_ocr_texts(result)), 1
     except ImportError:
         return "[PaddleOCR 未安装，请运行 pip install paddleocr paddlepaddle]", 1
     except Exception as e:
