@@ -182,6 +182,7 @@ export function CaseList() {
       {/* 拖拽上传材料区域 */}
       <FileDropZone
         cases={data}
+        storageKey="lawpilot:case-upload"
         onMaterialProcessed={(m) => {
           if (m.case_id) navigate(`/cases/${m.case_id}`)
         }}

@@ -73,7 +73,7 @@ export function DdWorkspace() {
       <Row gutter={16} className="mb-4">
         <Col span={12}>
           <Card title="材料上传" size="small">
-            <FileDropZone onMaterialProcessed={handleMaterialProcessed} />
+            <FileDropZone storageKey="lawpilot:dd-upload" onMaterialProcessed={handleMaterialProcessed} />
           </Card>
         </Col>
         <Col span={12}>

@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { Button, List, Tag, Typography, Progress, Select, message } from 'antd'
 import {
   InboxOutlined,
@@ -24,6 +24,7 @@ interface FileItem {
   status: 'pending' | 'processing' | 'done' | 'error'
   error?: string
   category?: string
+  caseId?: string
   suggestedCaseNumber?: string
 }
 
@@ -32,6 +33,8 @@ interface Props {
   cases?: CaseInfo[]
   /** 材料处理完成回调 */
   onMaterialProcessed?: (item: MaterialRow) => void
+  /** 页面作用域的 localStorage key，用于切换页面后恢复文件列表（避免跨页面串场） */
+  storageKey?: string
 }
 
 function getFileIcon(name: string) {
@@ -50,11 +53,59 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-export function FileDropZone({ cases = [], onMaterialProcessed }: Props) {
-  const [files, setFiles] = useState<FileItem[]>([])
+export function FileDropZone({ cases = [], onMaterialProcessed, storageKey }: Props) {
+  const [files, setFiles] = useState<FileItem[]>(() => {
+    if (!storageKey) return []
+    try {
+      const saved = localStorage.getItem(storageKey)
+      return saved ? (JSON.parse(saved) as FileItem[]) : []
+    } catch {
+      return []
+    }
+  })
   const [dragging, setDragging] = useState(false)
   const [importing, setImporting] = useState(false)
   const dragCounter = useRef(0)
+
+  // 持久化文件列表：切换页面后恢复，且跨页面不串场
+  useEffect(() => {
+    if (!storageKey) return
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(files))
+    } catch {
+      // localStorage 超出或不可用时静默忽略
+    }
+  }, [files, storageKey])
+
+  // 挂载时同步恢复的文件真实状态（切走时若正在处理，回来应更新为实际结果）
+  useEffect(() => {
+    if (!storageKey || files.length === 0) return
+    let cancelled = false
+    const syncIds = files.filter((f) => f.status === 'processing' || f.status === 'pending').map((f) => f.id)
+    if (syncIds.length === 0) return
+    ;(async () => {
+      const updates: Record<string, { status: FileItem['status']; category?: string; error?: string }> = {}
+      for (const id of syncIds) {
+        try {
+          const m = await window.api.material.get(id)
+          if (m) {
+            updates[id] = {
+              status: m.ocr_status === 'done' ? 'done' : m.ocr_status === 'error' ? 'error' : 'processing',
+              category: m.category,
+              error: m.ocr_error || undefined,
+            }
+          }
+        } catch {
+          // 忽略单个查询失败
+        }
+      }
+      if (cancelled) return
+      setFiles((prev) =>
+        prev.map((f) => (updates[f.id] ? { ...f, ...updates[f.id] } : f))
+      )
+    })()
+    return () => { cancelled = true }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const allowedExts = ['.pdf', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.doc', '.docx', '.txt', '.md']
 
@@ -98,11 +149,13 @@ export function FileDropZone({ cases = [], onMaterialProcessed }: Props) {
       for (let i = 0; i < e.dataTransfer.files.length; i++) {
         const f = e.dataTransfer.files[i]
         droppedAny = true
-        if (f.path && isAllowed(f.name)) {
+        // Electron 32+ 移除了 File.path，需通过 webUtils.getPathForFile 获取真实路径
+        const filePath = window.api.file.getPathForFile(f)
+        if (filePath && isAllowed(f.name)) {
           droppedFiles.push({
             id: `temp_${Date.now()}_${i}`,
             name: f.name,
-            path: f.path,
+            path: filePath,
             size: f.size,
             status: 'pending',
           })
@@ -184,8 +237,23 @@ export function FileDropZone({ cases = [], onMaterialProcessed }: Props) {
   }
 
   async function handleLinkCase(materialId: string, caseId: string) {
+    // AntD Select 清空时 onChange 会回调 undefined，此时视为"取消关联"
+    if (!caseId) {
+      message.info('已取消关联')
+      return
+    }
     try {
-      await window.api.material.linkToCase(materialId, caseId)
+      // 若 item.id 为临时 id（导入时未匹配到），先按原始文件名反查真实材料
+      let realId = materialId
+      if (materialId.startsWith('temp_')) {
+        const latest = await window.api.material.latest(100)
+        const matched = latest.find((m) => m.original_name === files.find((f) => f.id === materialId)?.name)
+        if (!matched) throw new Error('未找到对应的材料记录，请重新上传')
+        realId = matched.id
+      }
+      await window.api.material.linkToCase(realId, caseId)
+      // 回写状态并让父组件刷新
+      setFiles((prev) => prev.map((f) => (f.id === materialId ? { ...f, id: realId, caseId } : f)))
       message.success('已关联到案件')
     } catch (err) {
       message.error(`关联失败: ${(err as Error).message}`)
