@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers.health import router as health_router
 from app.routers.ocr import router as ocr_router
-from app.routers.classify import router as classify_router
 from app.routers.export import router as export_router
 from app.routers.llm import router as llm_router
 from app.routers.knowledge import router as knowledge_router
@@ -24,7 +23,6 @@ app.add_middleware(
 
 app.include_router(health_router)
 app.include_router(ocr_router)
-app.include_router(classify_router)
 app.include_router(export_router)
 app.include_router(llm_router)
 app.include_router(knowledge_router)
