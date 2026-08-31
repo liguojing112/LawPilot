@@ -224,11 +224,10 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
       } finally {
         setRagLoading(false)
       }
-      // RAG 模式也要保存
-      const savedMsgs = ragMode
-        ? [...history, { role: 'assistant' as const, content: history[history.length - 1]?.content || '', timestamp: new Date().toISOString() }]
-        : history
-      await persist(activeId!, savedMsgs, estimateTokens(savedMsgs[savedMsgs.length - 1]?.content || ''))
+      // RAG 模式也要保存。
+      // 注意必须用 convId 参数而非 activeId state：新建会话时 setActiveId 还没生效，
+      // 闭包里的 activeId 仍是 null，persist(null) 会让 UPDATE 匹配不到行、对话永不落库
+      await persist(convId!, finalMessages, estimateTokens(finalMessages[finalMessages.length - 1]?.content || ''))
       return
     }
 
