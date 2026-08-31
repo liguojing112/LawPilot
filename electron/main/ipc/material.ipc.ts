@@ -94,8 +94,8 @@ export function registerMaterialIpc(): void {
         const text = readFileSync(filePath, 'utf-8')
         updateMaterialOcr(materialId, text, 'done')
 
-        // 自动分类
-        const category = autoClassifyText(materialId, text)
+        // 自动分类（规则引擎 + LLM 兜底）
+        const category = await classifyMaterial(materialId, text)
         const caseNum = extractCaseNumber(text)
         if (window) {
           window.webContents.send(IPC_CHANNELS.MATERIAL_PROCESSED, {
@@ -131,8 +131,8 @@ export function registerMaterialIpc(): void {
 
       updateMaterialOcr(materialId, result.text, 'done')
 
-      // 自动分类
-      const category = autoClassifyText(materialId, result.text)
+      // 自动分类（规则引擎 + LLM 兜底）
+      const category = await classifyMaterial(materialId, result.text)
       const caseNum = extractCaseNumber(result.text)
 
       if (window) {
@@ -204,7 +204,7 @@ export function registerMaterialIpc(): void {
         return { category: '其他', confidence: 0 }
       }
       const prevCategory = material.category
-      const category = autoClassifyText(materialId, material.raw_text)
+      const category = await classifyMaterial(materialId, material.raw_text)
       if (material.case_id && category.category !== prevCategory) {
         createActivity(
           material.case_id,
@@ -258,45 +258,130 @@ export function registerMaterialIpc(): void {
   )
 }
 
-// ============== 本地规则引擎分类 ==============
+// ============== 本地规则引擎分类（标题区 + 结构特征 + 关键词三级信号）==============
 
-const CATEGORY_RULES: Record<
-  string,
-  { keywords: string[]; patterns: RegExp[]; weight: number }
-> = {
+interface CategoryRule {
+  /** 类别核心词：出现在标题区或文件名即为强信号 */
+  titleWords: string[]
+  /** 结构特征：文书独有格式，强信号 */
+  structures: RegExp[]
+  /** 内容关键词：弱信号 */
+  keywords: string[]
+}
+
+const CATEGORY_RULES: Record<string, CategoryRule> = {
   '起诉状': {
-    keywords: ['起诉状', '民事起诉状', '刑事自诉状', '行政起诉状', '具状人', '诉讼请求', '原告', '被告'],
-    patterns: [/诉讼请求/, /事实与理由/],
-    weight: 10,
+    titleWords: ['起诉状'],
+    structures: [
+      /原告[:：]/, /被告[:：]/, /诉讼请求[:：]/, /事实与理由/,
+      /此致\s*[\u4e00-\u9fa5]{2,12}人民法院/, /具状人/, /判令/, /请求依法/,
+    ],
+    keywords: ['起诉', '诉讼请求', '具状人', '事实与理由', '原告', '被告', '诉请', '判令'],
   },
   '答辩状': {
-    keywords: ['答辩状', '民事答辩状', '答辩人', '辩称'],
-    patterns: [/答辩.*意见/],
-    weight: 10,
+    titleWords: ['答辩状'],
+    structures: [
+      /答辩人[:：]/, /被答辩人/, /答辩如下/, /答辩请求/,
+      /因.{0,40}一案.{0,30}提出答辩/,
+    ],
+    keywords: ['答辩', '辩称', '答辩人', '答辩意见'],
+  },
+  '上诉状': {
+    titleWords: ['上诉状'],
+    structures: [
+      /上诉人[:：]/, /被上诉人[:：]/, /不服.{0,30}人民法院.{0,20}判决/, /上诉请求/, /上诉理由/,
+    ],
+    keywords: ['上诉', '上诉人', '被上诉人'],
   },
   '证据': {
-    keywords: ['证据目录', '证据清单', '证据材料', '证据来源', '证明力'],
-    patterns: [/证明目的/, /证据来源/],
-    weight: 8,
+    titleWords: ['证据目录', '证据清单'],
+    structures: [
+      /证据\s*[一二三四五六七八九十\d]+\s*[:：]/, /证明目的/, /证明内容/, /证据来源/,
+      /提交下列证据|提供如下证据/,
+    ],
+    keywords: ['证据', '证明目的', '证据目录', '证据清单', '证据材料'],
   },
   '判决': {
-    keywords: ['判决书', '民事判决书', '刑事判决书', '判决如下', '经审理查明', '本判决', '驳回'],
-    patterns: [/本院认为/, /判决如下/],
-    weight: 10,
+    titleWords: ['判决书'],
+    structures: [
+      /本院经审理查明|经审理查明/, /本院认为/, /判决如下/, /如不服本判决/,
+      /[\u4e00-\u9fa5]{2,15}人民法院$/, /案件受理费/, /审判长/,
+    ],
+    keywords: ['判决书', '判决如下', '经审理查明', '本判决', '审判长', '合议庭', '案件受理费'],
   },
   '裁定': {
-    keywords: ['裁定书', '民事裁定书', '裁定如下', '裁定驳回'],
-    patterns: [/裁定如下/],
-    weight: 10,
+    titleWords: ['裁定书'],
+    structures: [
+      /裁定如下/, /[\u4e00-\u9fa5]{2,15}人民法院$/, /准许.{0,10}撤诉/,
+      /不予受理/, /驳回.{0,10}申请/, /审判长/,
+    ],
+    keywords: ['裁定书', '裁定如下', '审判长', '合议庭'],
   },
   '合同': {
-    keywords: ['合同', '协议', '甲方', '乙方', '签订日期', '违约责任', '合同争议'],
-    patterns: [/甲方.*乙方/],
-    weight: 7,
+    titleWords: ['合同', '协议书'],
+    structures: [
+      /甲方[:：]/, /乙方[:：]/, /第[一二三四五六七八九十百\d]+条/, /违约责任/,
+      /本合同.{0,20}(?:签订|生效|成立)/, /签字.{0,6}盖章|盖章.{0,6}签字/, /签署(?:日期|地点)/,
+    ],
+    keywords: ['合同', '协议', '甲方', '乙方', '违约责任', '标的', '签订'],
   },
 }
 
-/** 本地关键词+规则引擎自动分类，返回分类标签和置信度 */
+/** 权重：结构特征 ×3，关键词 ×1，标题区命中 +6，文件名命中 +2；满分 10 归一化 */
+const STRUCTURE_WEIGHT = 3
+const TITLE_BOOST = 6
+const FILENAME_BOOST = 2
+const SCORE_NORMALIZER = 10
+/** 低于该置信度时触发 LLM 兜底 */
+const LLM_FALLBACK_THRESHOLD = 0.5
+/** LLM 兜底超时：超时后直接采用规则结果，避免阻塞材料处理流程 */
+const LLM_FALLBACK_TIMEOUT_MS = 12000
+
+/** 提取标题区：正文前 5 个非空且长度合理的行 */
+function extractTitleZone(text: string): string {
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0)
+  return lines.filter((l) => l.length <= 40).slice(0, 5).join('\n')
+}
+
+/** 规则引擎：返回类别、置信度和原始得分 */
+function ruleClassify(
+  text: string,
+  fileName: string
+): { category: string; confidence: number; score: number } {
+  const titleZone = extractTitleZone(text)
+  const lowerText = text.toLowerCase()
+  const lowerName = fileName.toLowerCase()
+
+  let bestCategory = '其他'
+  let bestScore = 0
+
+  for (const [category, rule] of Object.entries(CATEGORY_RULES)) {
+    let score = 0
+
+    // 结构特征（强）
+    for (const pat of rule.structures) {
+      if (pat.test(text)) score += STRUCTURE_WEIGHT
+    }
+    // 内容关键词（弱）
+    for (const kw of rule.keywords) {
+      if (lowerText.includes(kw.toLowerCase())) score += 1
+    }
+    // 标题区核心词（强）
+    if (rule.titleWords.some((w) => titleZone.includes(w))) score += TITLE_BOOST
+    // 文件名核心词（中）
+    if (rule.titleWords.some((w) => lowerName.includes(w.toLowerCase()))) score += FILENAME_BOOST
+
+    if (score > bestScore) {
+      bestScore = score
+      bestCategory = category
+    }
+  }
+
+  const confidence = Math.min(bestScore / SCORE_NORMALIZER, 0.99)
+  return { category: bestCategory, confidence, score: bestScore }
+}
+
+/** 本地规则引擎自动分类（同步、零依赖），写入数据库并返回结果 */
 function autoClassifyText(
   materialId: string,
   text: string
@@ -304,46 +389,56 @@ function autoClassifyText(
   const material = getMaterialById(materialId)
   if (!material) return { category: '其他', confidence: 0 }
 
-  const fileName = material.original_name.toLowerCase()
-  let bestCategory = '其他'
-  let bestScore = 0
+  const { category, confidence } = ruleClassify(text, material.original_name)
+  const result = confidence < 0.25 ? { category: '其他', confidence: confidence * 0.6 } : { category, confidence }
+  updateMaterialCategory(materialId, result.category, result.confidence)
+  return result
+}
 
-  for (const [category, rules] of Object.entries(CATEGORY_RULES)) {
-    let score = 0
-    let maxScore = 0
+/** LLM 兜底分类：规则置信度不足时调用云端模型，失败则静默回退 */
+async function classifyWithLlmFallback(
+  materialId: string,
+  text: string
+): Promise<{ category: string; confidence: number }> {
+  try {
+    const status = await pythonBridge.getStatus()
+    if (!status.running) return { category: '', confidence: 0 }
 
-    // 文件名匹配（权重 ×2）
-    for (const kw of rules.keywords) {
-      if (fileName.includes(kw.toLowerCase())) {
-        score += 2
-      }
+    const material = getMaterialById(materialId)
+    const result = await pythonBridge.post<{
+      ok: boolean
+      category: string
+      confidence: number
+    }>('/llm/classify', {
+      file_name: material?.original_name || '',
+      text: text.slice(0, 1500),
+    })
+
+    if (result?.ok && result.category) {
+      const confidence = Math.max(0, Math.min(result.confidence || 0.7, 0.99))
+      updateMaterialCategory(materialId, result.category, confidence)
+      return { category: result.category, confidence }
     }
-
-    // 内容关键词匹配
-    const lowerText = text.toLowerCase()
-    for (const kw of rules.keywords) {
-      maxScore += 1
-      if (lowerText.includes(kw.toLowerCase())) {
-        score += 1
-      }
-    }
-
-    // 正则模式匹配
-    for (const pat of rules.patterns) {
-      maxScore += 2
-      if (pat.test(text)) {
-        score += 2
-      }
-    }
-
-    const normalizedScore = maxScore > 0 ? score / maxScore : 0
-    if (normalizedScore > bestScore) {
-      bestScore = normalizedScore
-      bestCategory = category
-    }
+  } catch {
+    // LLM 不可用时保持规则结果
   }
+  return { category: '', confidence: 0 }
+}
 
-  const confidence = Math.min(bestScore, 0.99)
-  updateMaterialCategory(materialId, bestCategory, confidence)
-  return { category: bestCategory, confidence }
+/** 完整分类流程：规则引擎 → 低置信度时 LLM 兜底（带超时，超时回退规则结果） */
+async function classifyMaterial(
+  materialId: string,
+  text: string
+): Promise<{ category: string; confidence: number }> {
+  const ruleResult = autoClassifyText(materialId, text)
+  if (ruleResult.confidence >= LLM_FALLBACK_THRESHOLD) {
+    return ruleResult
+  }
+  const llmResult = await Promise.race([
+    classifyWithLlmFallback(materialId, text),
+    new Promise<{ category: string; confidence: number }>((resolve) =>
+      setTimeout(() => resolve({ category: '', confidence: 0 }), LLM_FALLBACK_TIMEOUT_MS)
+    ),
+  ])
+  return llmResult.category ? llmResult : ruleResult
 }

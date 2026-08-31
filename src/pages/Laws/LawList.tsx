@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Table, Button, Input, Select, Tag, Space, Typography, Progress, notification, message } from 'antd'
-import { PlusOutlined, SearchOutlined, FileTextOutlined } from '@ant-design/icons'
+import { Table, Button, Input, Select, Tag, Space, Typography, Progress, notification, message, Popconfirm } from 'antd'
+import { PlusOutlined, SearchOutlined, FileTextOutlined, DeleteOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import type { ImportResult, LawSearchResult } from '../../../shared/types'
 import type { ColumnsType } from 'antd/es/table'
@@ -56,7 +56,10 @@ export function LawList() {
 
   async function handleImport(): Promise<void> {
     const files = await window.api.file.select({
-      filters: [{ name: '法规文件', extensions: ['txt', 'md'] }],
+      filters: [
+        { name: '法规文件', extensions: ['txt', 'md', 'pdf', 'docx', 'doc'] },
+        { name: '所有文件', extensions: ['*'] },
+      ],
     })
     if (!files || files.length === 0) return
 
@@ -90,6 +93,16 @@ export function LawList() {
       unsub()
       setImporting(false)
       setImportProgress(null)
+    }
+  }
+
+  async function handleDelete(id: string): Promise<void> {
+    try {
+      await window.api.law.delete(id)
+      message.success('已删除该法规')
+      fetchList()
+    } catch (err) {
+      message.error(`删除失败: ${(err as Error).message}`)
     }
   }
 
@@ -137,11 +150,25 @@ export function LawList() {
       title: '操作',
       key: 'actions',
       render: (_: unknown, record: LawSearchResult) => (
-        <Button type="link" size="small" onClick={() => navigate(`/laws/${record.id}`)}>
-          查看条款
-        </Button>
+        <Space>
+          <Button type="link" size="small" onClick={() => navigate(`/laws/${record.id}`)}>
+            查看条款
+          </Button>
+          <Popconfirm
+            title="确认删除该法规？"
+            description="将同时删除其全部条款，此操作不可恢复"
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => handleDelete(record.id)}
+          >
+            <Button type="link" size="small" danger icon={<DeleteOutlined />}>
+              删除
+            </Button>
+          </Popconfirm>
+        </Space>
       ),
-      width: 100,
+      width: 170,
     },
   ]
 

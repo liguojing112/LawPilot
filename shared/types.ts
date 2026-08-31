@@ -20,6 +20,7 @@ export const IPC_CHANNELS = {
   LAW_LIST: 'law:list',
   LAW_COUNT: 'law:count',
   LAW_IMPORT: 'law:import',
+  LAW_DELETE: 'law:delete',
   LAW_IMPORT_PROGRESS: 'law:import-progress',
   LAW_EXPORT: 'law:export',
   LAW_COMPARE: 'law:compare',
@@ -375,6 +376,7 @@ export interface LawPilotAPI {
     getRevisions(lawId: string): Promise<Revision[]>
     addRevision(data: { lawId: string; versionTag: string; changeLog?: string; fullText: string }): Promise<Revision>
     getRevision(revisionId: string): Promise<Revision | null>
+    delete(id: string): Promise<void>
   }
   case: {
     list(filters?: { case_type?: string; case_status?: string }): Promise<CaseInfo[]>

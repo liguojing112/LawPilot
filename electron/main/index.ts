@@ -36,13 +36,18 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
-  // 生产模式：使用自定义协议加载 renderer
-  // 这样可以避免 file:// 协议不支持 ES module 的问题
-  const rendererPath = join(__dirname, '../renderer/index.html')
-  log.info('[Main] Loading renderer from:', rendererPath)
-
-  // 使用 file:// 加载（已注册自定义协议处理）
-  mainWindow.loadFile(rendererPath)
+  // 开发模式：加载 Vite dev server（支持 HMR）；生产模式：加载静态构建产物
+  const devUrl = process.env['ELECTRON_RENDERER_URL']
+  if (!app.isPackaged && devUrl) {
+    log.info('[Main] Loading renderer from dev server:', devUrl)
+    mainWindow.loadURL(devUrl)
+  } else {
+    // 生产模式：使用自定义协议加载 renderer
+    // 这样可以避免 file:// 协议不支持 ES module 的问题
+    const rendererPath = join(__dirname, '../renderer/index.html')
+    log.info('[Main] Loading renderer from:', rendererPath)
+    mainWindow.loadFile(rendererPath)
+  }
 
   if (!app.isPackaged) {
     mainWindow.webContents.openDevTools()

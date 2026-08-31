@@ -1,6 +1,7 @@
 """LLM 云端大模型调用路由 — 聊天/RAG/报告/策略（轻量版）"""
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 from fastapi import APIRouter
@@ -530,3 +531,66 @@ async def privacy_preview(req: PrivacyPreviewRequest):
         return {"ok": True, "preview": result}
     except Exception as e:
         return {"ok": False, "message": _friendly_error(e)}
+
+
+class ClassifyRequest(BaseModel):
+    file_name: str = ""
+    text: str
+
+
+VALID_CATEGORIES = ["起诉状", "答辩状", "上诉状", "证据", "判决", "裁定", "合同", "其他"]
+
+
+@router.post("/classify")
+async def llm_classify(req: ClassifyRequest):
+    """LLM 法律文书分类兜底（规则引擎低置信度时调用）"""
+    try:
+        cfg = _get_ai_config()
+        if not cfg.get("api_key"):
+            return {"ok": False, "category": "", "confidence": 0, "message": "未配置 API Key"}
+
+        snippet = (req.text or "").strip()[:1500]
+        if not snippet:
+            return {"ok": False, "category": "", "confidence": 0, "message": "文本为空"}
+
+        prompt = (
+            "你是法律文书分类器。请将以下法律材料严格归入以下类别之一（必须原样选择，不要自创类别）：\n"
+            + "、".join(VALID_CATEGORIES)
+            + "\n\n判断依据：起诉状=当事人向法院起诉的文书；答辩状=针对起诉的答辩；上诉状=不服判决提起上诉；"
+            "证据=证据清单/证据材料；判决=法院判决书；裁定=法院裁定书；合同=双方协议合同；其他=无法归入以上类别。\n"
+            "只输出 JSON，格式：{\"category\": \"类别\", \"confidence\": 0.0到1.0}\n\n"
+            + f"文件名：{req.file_name}\n材料内容：\n{snippet}"
+        )
+        content = await _call_llm(
+            [{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=100,
+        )
+        if content.startswith("[错误]") or content.startswith("请先"):
+            return {"ok": False, "category": "", "confidence": 0, "message": content}
+
+        # 解析 JSON（容忍 ```json 包裹）
+        raw = content.strip()
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.S)
+        match = re.search(r"\{[^{}]*\}", raw, re.S)
+        if not match:
+            # 从文本中直接找类别词兜底
+            for cat in VALID_CATEGORIES:
+                if cat in raw:
+                    return {"ok": True, "category": cat, "confidence": 0.7, "method": "llm"}
+            return {"ok": False, "category": "", "confidence": 0, "message": "返回格式无法解析"}
+
+        parsed = json.loads(match.group(0))
+        category = str(parsed.get("category", "")).strip()
+        confidence = float(parsed.get("confidence", 0.7))
+        if category not in VALID_CATEGORIES:
+            # 模糊匹配
+            for cat in VALID_CATEGORIES:
+                if cat and (cat in category or category in cat):
+                    category = cat
+                    break
+            else:
+                category = "其他"
+        return {"ok": True, "category": category, "confidence": max(0.0, min(confidence, 0.99)), "method": "llm"}
+    except Exception as e:
+        return {"ok": False, "category": "", "confidence": 0, "message": _friendly_error(e)}

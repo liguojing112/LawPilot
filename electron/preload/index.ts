@@ -40,6 +40,7 @@ const api: LawPilotAPI = {
       ipcRenderer.invoke(IPC_CHANNELS.LAW_ADD_REVISION, data),
     getRevision: (revisionId: string) =>
       ipcRenderer.invoke(IPC_CHANNELS.LAW_GET_REVISION, revisionId),
+    delete: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.LAW_DELETE, id),
   },
 
   case: {

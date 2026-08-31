@@ -27,10 +27,8 @@ def rewrite_query(question: str) -> list[str]:
     """将用户问题改写为多个检索子查询"""
     queries = [question]
 
-    # 提取"第X条"关键词，生成精确匹配查询
-    article_match = re.search(r'第([一二三四五六七八九十百千零\d]+)条', question)
-    if article_match:
-        queries.append(article_match.group(0))
+    # "第X条"不做独立子查询：检索服务内部已对含该模式的问题做精确匹配通道，
+    # 单独的"第X条"语义查询只会召回各法规中无关的同号条文
 
     # 提取法律名称
     law_match = re.search(r'《(.+?)》', question)
@@ -46,11 +44,27 @@ def rewrite_query(question: str) -> list[str]:
 
 # ─── 混合检索 + Reranker ─────────────────────────────────────
 
+def _extract_keywords(question: str) -> list[str]:
+    """提取查询关键词：优先 jieba 分词，退化到连续汉字段"""
+    question = question.strip()
+    if not question:
+        return []
+    try:
+        import jieba
+
+        words = [w.strip() for w in jieba.lcut(question) if len(w.strip()) >= 2]
+        if words:
+            return list(dict.fromkeys(words))
+    except ImportError:
+        pass
+    return list(dict.fromkeys(re.findall(r'[\u4e00-\u9fa5]{2,}', question)))
+
+
 def hybrid_search(question: str, top_k: int = 10) -> list[RagChunk]:
     """向量语义 + 关键词精确 + BM25 风格 rerank"""
-    from app.services.embedding_service import search_similar, _get_table, _get_model
+    from app.services.embedding_service import search_similar
 
-    # 1. 多查询检索
+    # 1. 多查询检索（search_similar 已超量取回 4x，这里融合后取 top_k）
     queries = rewrite_query(question)
     all_results: dict[str, dict] = {}
 
@@ -59,18 +73,23 @@ def hybrid_search(question: str, top_k: int = 10) -> list[RagChunk]:
             hits = search_similar(q, top_k=top_k)
             for h in hits:
                 chunk_id = h.get("id", "")
-                if chunk_id and chunk_id not in all_results:
+                if not chunk_id:
+                    continue
+                if chunk_id not in all_results:
                     all_results[chunk_id] = h
+                else:
+                    # 多子查询命中同一块：保留最优（最小）distance，不丢失更佳相似度
+                    if h.get("distance", 1.0) < all_results[chunk_id].get("distance", 1.0):
+                        all_results[chunk_id] = h
         except Exception:
             continue
 
     if not all_results:
         return []
 
-    # 2. 计算综合得分（向量相似度 + 关键词命中 + 位置加权）
+    # 2. 计算综合得分（向量相似度 + 分词关键词命中 + 条号精确加权）
     scored: list[RagChunk] = []
-    question_lower = question.lower()
-    keywords = set(re.findall(r'[\u4e00-\u9fa5]{2,}', question))
+    keywords = _extract_keywords(question)
 
     for chunk in all_results.values():
         score = 0.0
@@ -82,10 +101,10 @@ def hybrid_search(question: str, top_k: int = 10) -> list[RagChunk]:
         vector_score = max(0, 1.0 - distance)
         score += vector_score * 0.6
 
-        # 关键词命中得分
+        # 关键词命中得分（jieba 分词后逐词匹配）
         text_lower = text.lower()
         title_lower = title.lower()
-        keyword_hits = sum(1 for kw in keywords if kw in text_lower or kw in title_lower)
+        keyword_hits = sum(1 for kw in keywords if kw.lower() in text_lower or kw.lower() in title_lower)
         keyword_score = min(1.0, keyword_hits / max(1, len(keywords)))
         score += keyword_score * 0.3
 
@@ -105,8 +124,8 @@ def hybrid_search(question: str, top_k: int = 10) -> list[RagChunk]:
 
     for chunk in scored:
         title = chunk.get("title", "")
-        # 同一文档最多保留 2 个 chunk
-        if title in seen_titles and seen_titles[title] >= 2:
+        # 同一文档最多保留 3 个 chunk（长材料允许更多相关段落入选）
+        if title in seen_titles and seen_titles[title] >= 3:
             continue
         seen_titles[title] = seen_titles.get(title, 0) + 1
         deduped.append(chunk)
@@ -134,12 +153,13 @@ def build_context(chunks: list[RagChunk], max_tokens: int = 6000) -> str:
         label = f"[来源{i+1}] ({source_type}, {title})"
 
         # 控制单个 chunk 长度
-        if len(text) > 1500:
-            text = text[:1500] + "..."
+        if len(text) > 2000:
+            text = text[:2000] + "..."
 
         entry = f"{label}:\n{text}"
         if total_chars + len(entry) > char_limit:
-            break
+            # 超预算时跳过该块继续尝试更小的块，而不是丢弃全部剩余
+            continue
 
         parts.append(entry)
         total_chars += len(entry)

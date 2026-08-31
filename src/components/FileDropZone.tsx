@@ -180,7 +180,7 @@ export function FileDropZone({ cases = [], onMaterialProcessed, storageKey }: Pr
 
     const newFiles: FileItem[] = result.map((path, i) => {
       const name = path.split(/[\\/]/).pop() || path
-      return { id: `temp_sel_${Date.now()}_${i}`, name, size: 0, status: 'pending' }
+      return { id: `temp_sel_${Date.now()}_${i}`, name, path, size: 0, status: 'pending' }
     })
     setFiles((prev) => [...prev, ...newFiles])
     await importFiles(result)
@@ -190,38 +190,52 @@ export function FileDropZone({ cases = [], onMaterialProcessed, storageKey }: Pr
     if (filePaths.length === 0) return
     setImporting(true)
 
-    // 标记为处理中
+    // 仅把本批次的 pending 项标记为处理中
+    const batchPaths = new Set(filePaths)
     setFiles((prev) =>
       prev.map((f) =>
-        f.status === 'pending' ? { ...f, status: 'processing' as const } : f
+        f.status === 'pending' && f.path && batchPaths.has(f.path)
+          ? { ...f, status: 'processing' as const }
+          : f
       )
     )
 
     try {
+      // 主进程按输入顺序返回结果：results[i] ↔ filePaths[i]
       const results = await window.api.material.import(filePaths)
+
+      // 路径 → results 下标队列（兼容同批次重复路径）
+      const indicesByPath = new Map<string, number[]>()
+      filePaths.forEach((p, idx) => {
+        const list = indicesByPath.get(p) || []
+        list.push(idx)
+        indicesByPath.set(p, list)
+      })
+      const cursor = new Map<string, number>()
 
       setFiles((prev) =>
         prev.map((f) => {
-          // 尝试匹配结果
-          const matchName = (r: { material?: { original_name: string } | null }) =>
-            r.material?.original_name === f.name
-          const idx = results.findIndex(matchName)
-          if (idx >= 0 && results[idx]) {
-            const r = results[idx]
-            if (r.material) {
-              // 通知父组件材料已导入，触发自动关联案件等操作
-              onMaterialProcessed?.(r.material)
-              return {
-                ...f,
-                id: r.material.id,
-                status: 'done' as const,
-                category: r.material.category,
-              }
+          // 按完整路径匹配（同名文件、特殊文件名均可靠）
+          if (!f.path) return f
+          const list = indicesByPath.get(f.path)
+          if (!list || list.length === 0) return f
+          const used = cursor.get(f.path) || 0
+          if (used >= list.length) return f
+          cursor.set(f.path, used + 1)
+
+          const r = results[list[used]]
+          if (!r) return f
+          if (r.material) {
+            // 通知父组件材料已导入，触发自动关联案件等操作
+            onMaterialProcessed?.(r.material)
+            return {
+              ...f,
+              id: r.material.id,
+              status: 'done' as const,
+              category: r.material.category,
             }
-            return { ...f, status: 'error' as const, error: r.error }
           }
-          // 如果找不到精确匹配，保持 processing 直到 MATERIAL_PROCESSED 事件更新
-          return f.status === 'processing' ? f : { ...f, status: 'done' as const }
+          return { ...f, status: 'error' as const, error: r.error }
         })
       )
     } catch (err) {

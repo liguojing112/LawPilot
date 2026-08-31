@@ -1,4 +1,4 @@
-import { ipcMain, dialog, BrowserWindow } from 'electron'
+﻿import { ipcMain, dialog, BrowserWindow } from 'electron'
 import { readFileSync } from 'fs'
 import { basename, extname } from 'path'
 import { IPC_CHANNELS, type ImportResult } from '../../../shared/types'
@@ -11,13 +11,19 @@ import {
   getArticlesByLawId,
   insertArticles,
   searchArticles,
+  deleteLaw,
   getArticleById,
   addRevision,
   getRevisionsByLawId,
   getRevisionById,
 } from '../services/database'
+import { pythonBridge } from '../services/python-bridge'
 
 import type { LawRow, ArticleRow } from '../services/database'
+
+const TEXT_EXTS = ['.txt', '.md', '.text']
+const DOC_EXTS = ['.pdf', '.docx', '.doc']
+const ALL_EXTS = [...TEXT_EXTS, ...DOC_EXTS]
 
 export function registerLawIpc(): void {
   // ---- 导入 ----
@@ -30,13 +36,19 @@ export function registerLawIpc(): void {
         const filePath = filePaths[i]
         try {
           const ext = extname(filePath).toLowerCase()
-          if (!['.txt', '.md', '.text'].includes(ext)) {
+          if (!ALL_EXTS.includes(ext)) {
             result.skipped++
             result.errors.push(`${basename(filePath)}: 不支持的文件格式`)
             continue
           }
 
-          const content = readFileSync(filePath, 'utf-8')
+          let content: string
+          if (TEXT_EXTS.includes(ext)) {
+            content = readFileSync(filePath, 'utf-8')
+          } else {
+            content = await extractTextViaPython(filePath, ext)
+          }
+
           const parsed = parseLawFile(content, basename(filePath, ext))
 
           // 去重
@@ -91,6 +103,11 @@ export function registerLawIpc(): void {
     }
   )
 
+  // ---- 删除 ----
+  ipcMain.handle(IPC_CHANNELS.LAW_DELETE, (_event, lawId: string) => {
+    deleteLaw(lawId)
+  })
+
   // ---- 列表 ----
   ipcMain.handle(IPC_CHANNELS.LAW_LIST, (_event, params) => {
     return listLaws(params || {})
@@ -141,6 +158,32 @@ export function registerLawIpc(): void {
   ipcMain.handle(IPC_CHANNELS.LAW_GET_REVISION, (_event, revisionId: string) => {
     return getRevisionById(revisionId) || null
   })
+}
+
+// ============== PDF/DOCX 文本提取（通过 Python 后端）==============
+
+async function extractTextViaPython(filePath: string, ext: string): Promise<string> {
+  const status = await pythonBridge.getStatus()
+  if (!status.running) {
+    throw new Error('Python 服务未启动，无法解析 PDF/DOCX 文件。请先启动 Python 后端服务。')
+  }
+
+  const fileType = ext.replace('.', '')
+  const result = await pythonBridge.post<{ text: string; page_count: number }>(
+    '/ocr/extract',
+    { file_path: filePath, file_type: fileType }
+  )
+
+  if (!result.text || result.text.trim().length === 0) {
+    throw new Error(`从 ${ext} 文件中未提取到文本内容（可能是扫描件或纯图片 PDF）`)
+  }
+
+  // 识别 Python 后端返回的依赖缺失占位符（如 "[python-docx 未安装]"）
+  if (/^\[.+未安装(，?.*)?\]$/.test(result.text.trim())) {
+    throw new Error(`文本提取失败：${result.text.trim()}`)
+  }
+
+  return result.text
 }
 
 // ============== 法规文件解析器 ==============
@@ -273,8 +316,7 @@ function parseArticles(
   }> = []
 
   let orderNum = 0
-  let currentParent: { level: number; id: string } | null = null
-  const parentStack: Array<{ level: number; id: string }> = []
+  const parentStack: Array<{ level: number; orderNum: number }> = []
 
   let match: RegExpExecArray | null
   while ((match = headingRegex.exec(text)) !== null) {
@@ -309,24 +351,19 @@ function parseArticles(
       content = (match[8] || '').trim()
     }
 
-    // 计算 parent_id：找到最近的上级层级
-    let parentId: string | null = null
+    // 计算 parent_id：弹出所有不比自己浅的层级，栈顶即最近上级
     while (parentStack.length > 0 && parentStack[parentStack.length - 1].level >= level) {
       parentStack.pop()
     }
-    if (parentStack.length > 0) {
-      parentId = parentStack[parentStack.length - 1].id
-    }
+    const parentOrderNum =
+      parentStack.length > 0 ? parentStack[parentStack.length - 1].orderNum : null
 
-    // 为新层级创建临时 ID（生成虚拟 ID 用于建立父子关系，后续由数据库分配真实 UUID）
-    const virtualId = `__virtual_${orderNum}`
     if (level < 4) {
-      parentStack.push({ level, id: virtualId })
-      currentParent = { level, id: virtualId }
+      parentStack.push({ level, orderNum })
     }
 
     result.push({
-      parent_id: parentId, // 实际存 parent 的虚拟 ID
+      parent_id: parentOrderNum != null ? String(parentOrderNum) : null,
       level,
       order_num: orderNum,
       article_num: articleNum,
@@ -347,68 +384,5 @@ function parseArticles(
     })
   }
 
-  // 第二遍：将虚拟 parent_id 替换为实际 order_num 引用
-  // 重新处理：用 order_num 作为父引用
-  return resolveParentRefs(result)
-}
-
-/** 将虚拟 parent_id 转换为基于 order_num 的父引用（供数据库插入时重新解析） */
-function resolveParentRefs(
-  articles: Array<{
-    parent_id?: string | null
-    level: number
-    order_num: number
-    article_num?: string | null
-    title?: string | null
-    content: string
-  }>
-): Array<{
-  parent_id?: string | null
-  level: number
-  order_num: number
-  article_num?: string | null
-  title?: string | null
-  content: string
-}> {
-  // 为每个非条级别的节点建立 orderNum → 虚拟ID 映射
-  const levelMap = new Map<number, number>() // orderNum → parentOrderNum
-
-  let lastPerLevel: Record<number, number> = {}
-
-  for (const a of articles) {
-    if (a.level < 4) {
-      // 清除更深层级
-      for (const lvl of Object.keys(lastPerLevel).map(Number)) {
-        if (lvl >= a.level) delete lastPerLevel[lvl]
-      }
-      // 找到最近上级
-      const parentLevels = Object.keys(lastPerLevel)
-        .map(Number)
-        .filter((l) => l < a.level)
-        .sort((a, b) => b - a)
-      if (parentLevels.length > 0) {
-        levelMap.set(a.order_num, lastPerLevel[parentLevels[0]])
-      }
-      lastPerLevel[a.level] = a.order_num
-    }
-  }
-
-  // 为每个条款查找父级
-  for (const a of articles) {
-    if (a.level === 4) {
-      const parentLevels = Object.keys(lastPerLevel)
-        .map(Number)
-        .filter((l) => l < 4)
-        .sort((a, b) => b - a)
-      if (parentLevels.length > 0) {
-        a.parent_id = String(lastPerLevel[parentLevels[0]])
-      } else {
-        a.parent_id = null
-      }
-    } else {
-      a.parent_id = levelMap.get(a.order_num) ? String(levelMap.get(a.order_num)) : null
-    }
-  }
-
-  return articles
+  return result
 }

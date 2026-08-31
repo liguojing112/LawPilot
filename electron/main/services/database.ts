@@ -386,7 +386,15 @@ export function listLaws(params: {
     values.status = params.status
   }
   if (params.keyword) {
-    conditions.push("title LIKE '%' || @keyword || '%'")
+    // 同时匹配法规名称和条文内容（含条号）
+    conditions.push(
+      `(title LIKE '%' || @keyword || '%'
+        OR id IN (
+          SELECT DISTINCT law_id FROM articles
+          WHERE content LIKE '%' || @keyword || '%'
+             OR article_num LIKE '%' || @keyword || '%'
+        ))`
+    )
     values.keyword = params.keyword
   }
 
@@ -404,6 +412,13 @@ export function listLaws(params: {
     .all({ ...values, limit: pageSize, offset: (page - 1) * pageSize }) as LawRow[]
 
   return { items, total }
+}
+
+/** 删除法规（连同其全部条款，FTS 索引由触发器同步清理） */
+export function deleteLaw(id: string): void {
+  const db = getDatabase()
+  db.prepare('DELETE FROM articles WHERE law_id = ?').run(id)
+  db.prepare('DELETE FROM laws WHERE id = ?').run(id)
 }
 
 /** 获取法规总数 */

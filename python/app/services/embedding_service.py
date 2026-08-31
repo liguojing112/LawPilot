@@ -116,7 +116,8 @@ def _fetch_law_articles() -> list[dict]:
             "source_type": "law",
             "source_id": row[0],
             "title": row[4],
-            "text": f"{row[2] or ''}: {row[3]}",
+            # 标题+条号进索引文本：跨法规同名条文可区分，法名查询可召回
+            "text": f"《{row[4]}》{row[2] or ''}: {row[3]}",
             "law_id": row[1],
             "article_id": row[0],
         }
@@ -124,22 +125,47 @@ def _fetch_law_articles() -> list[dict]:
     ]
 
 
-CHUNK_SIZE = 500
-CHUNK_OVERLAP = 100
+# BGE v1.5 官方查询指令（仅查询侧使用，文档侧不加）
+BGE_QUERY_PREFIX = "为这个句子生成表示以用于检索相关文章："
+
+# 380 字 ≈ 380-520 BPE token，确保不超出 bge-small-zh-v1.5 的 512 token 窗口
+CHUNK_SIZE = 380
+CHUNK_OVERLAP = 80
 
 
 def _split_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
-    """按段落和条款边界智能分块，避免在句子中间截断"""
+    """按段落和条款边界智能分块：句子内不截断、块间带 overlap、超长句强制切分"""
     import re
 
     if len(text) <= chunk_size:
         return [text]
 
+    def _hard_split(long_text: str) -> list[str]:
+        """把超过 chunk_size 的不可再分文本按固定窗口强制切分"""
+        return [long_text[i:i + chunk_size] for i in range(0, len(long_text), chunk_size - overlap)]
+
     # 第一步：按空行/双换行拆成段落
     paragraphs = re.split(r'\n\s*\n', text)
 
-    chunks = []
+    chunks: list[str] = []
     current = ''
+
+    def _close_chunk():
+        """关闭当前块；把尾部 overlap 文字带入下一块（按句子边界回退）"""
+        nonlocal current
+        if not current.strip():
+            current = ''
+            return
+        chunks.append(current.strip())
+        if overlap > 0 and len(current) > overlap:
+            tail = current[-overlap:]
+            # 从 tail 中找句子边界，避免 overlap 从句中开始
+            m = re.search(r'[。；;！？\n]', tail)
+            if m and m.end() < len(tail) - 10:
+                tail = tail[m.end():]
+            current = tail.strip()
+        else:
+            current = ''
 
     for para in paragraphs:
         para = para.strip()
@@ -149,8 +175,7 @@ def _split_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OV
         # 段落本身超过 chunk_size，按条款/句子进一步拆分
         if len(para) > chunk_size:
             if current:
-                chunks.append(current.strip())
-                current = ''
+                _close_chunk()
 
             # 按"第X条"、句号、分号等拆分
             parts = re.split(r'(?=(?:第[一二三四五六七八九十百千零\d]+条[^\S\n]*|[；;。]))', para)
@@ -158,23 +183,33 @@ def _split_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OV
                 part = part.strip()
                 if not part:
                     continue
+                # 单句仍超长：强制切分，直接成块
+                if len(part) > chunk_size:
+                    if current.strip():
+                        _close_chunk()
+                    for piece in _hard_split(part):
+                        chunks.append(piece.strip())
+                    current = ''
+                    continue
                 if len(current) + len(part) + 1 <= chunk_size:
                     current = (current + '\n' + part).strip() if current else part
                 else:
-                    if current:
-                        chunks.append(current.strip())
+                    _close_chunk()
                     current = part
         else:
             # 当前段落能放进现有 chunk 就合并
             if len(current) + len(para) + 1 <= chunk_size:
                 current = (current + '\n\n' + para).strip() if current else para
             else:
-                if current:
-                    chunks.append(current.strip())
+                _close_chunk()
                 current = para
 
     if current.strip():
-        chunks.append(current.strip())
+        # 剩余内容太短且已有块时并入上一块
+        if chunks and len(current.strip()) < overlap // 2:
+            chunks[-1] = (chunks[-1] + '\n' + current.strip()).strip()
+        else:
+            chunks.append(current.strip())
 
     return chunks if chunks else [text[:chunk_size]]
 
@@ -287,29 +322,31 @@ def rebuild_index() -> dict:
 
 
 def search_similar(query: str, top_k: int = 10) -> list[SearchResult]:
-    """混合检索：向量语义 + 关键词过滤"""
+    """混合检索：向量语义（超量取回）+ 有界关键词精确回退"""
     import re
 
     table = _get_table()
     model = _get_model()
 
-    # 向量语义检索
-    query_vec = model.encode([query], normalize_embeddings=True, show_progress_bar=False)[0]
+    # 向量语义检索：超量取回 4 倍候选，供上层融合排序（避免排名边缘的相关块被截断）
+    # BGE 官方建议：查询侧加指令前缀可显著提升短查询召回
+    fetch_k = max(top_k * 4, 20)
+    query_text = BGE_QUERY_PREFIX + query
+    query_vec = model.encode([query_text], normalize_embeddings=True, show_progress_bar=False)[0]
     results = (
         table.search(query_vec.tolist())
         .metric("cosine")
-        .limit(top_k)
+        .limit(fetch_k)
         .select(["id", "source_type", "title", "text", "law_id", "article_id"])
         .to_list()
     )
 
-    # 如果查询包含"第X条"，额外做关键词精确匹配
+    # 如果查询包含"第X条"，额外做关键词精确匹配（有界：最多补 8 条，避免淹没语义结果）
     article_match = re.search(r'第([一二三四五六七八九十百千零\d]+)条', query)
     if article_match:
         article_keyword = article_match.group(0)
-        # 扫描全表找包含该关键词的 chunk
         df = table.to_pandas()
-        keyword_hits = df[df['text'].str.contains(article_keyword, na=False)]
+        keyword_hits = df[df['text'].str.contains(article_keyword, na=False)].head(8)
         existing_ids = {r.get('id') for r in results}
         for _, row in keyword_hits.iterrows():
             if row['id'] not in existing_ids:
@@ -320,7 +357,8 @@ def search_similar(query: str, top_k: int = 10) -> list[SearchResult]:
                     'text': row['text'],
                     'law_id': row.get('law_id', ''),
                     'article_id': row.get('article_id', ''),
-                    '_distance': 0.0,
+                    # 固定小 distance（相似度 0.9），精确命中优先但不至于完全压过语义结果
+                    '_distance': 0.1,
                 })
 
     return [
