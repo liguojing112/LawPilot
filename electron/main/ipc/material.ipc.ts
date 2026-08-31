@@ -332,10 +332,10 @@ const STRUCTURE_WEIGHT = 3
 const TITLE_BOOST = 6
 const FILENAME_BOOST = 2
 const SCORE_NORMALIZER = 10
-/** 低于该置信度时触发 LLM 兜底 */
-const LLM_FALLBACK_THRESHOLD = 0.5
-/** LLM 兜底超时：超时后直接采用规则结果，避免阻塞材料处理流程 */
-const LLM_FALLBACK_TIMEOUT_MS = 12000
+/** 快速路径阈值：规则引擎对标准文书足够确信时离线直接采用，不调用 LLM */
+const FAST_PATH_THRESHOLD = 0.75
+/** LLM 判定超时：超时后回退规则结果，避免阻塞材料处理流程 */
+const LLM_TIMEOUT_MS = 12000
 
 /** 提取标题区：正文前 5 个非空且长度合理的行 */
 function extractTitleZone(text: string): string {
@@ -395,8 +395,8 @@ function autoClassifyText(
   return result
 }
 
-/** LLM 兜底分类：规则置信度不足时调用云端模型，失败则静默回退 */
-async function classifyWithLlmFallback(
+/** 语义 LLM 分类：规则引擎无法高置信判定时调用云端模型，失败则返回空结果（由调用方回退规则） */
+async function classifyWithLlm(
   materialId: string,
   text: string
 ): Promise<{ category: string; confidence: number }> {
@@ -425,19 +425,23 @@ async function classifyWithLlmFallback(
   return { category: '', confidence: 0 }
 }
 
-/** 完整分类流程：规则引擎 → 低置信度时 LLM 兜底（带超时，超时回退规则结果） */
+/** 完整分类流程：规则引擎快速路径（高置信具体类别）→ 语义 LLM 判定（复杂/低置信）→ LLM 不可用回退规则结果 */
 async function classifyMaterial(
   materialId: string,
   text: string
 ): Promise<{ category: string; confidence: number }> {
   const ruleResult = autoClassifyText(materialId, text)
-  if (ruleResult.confidence >= LLM_FALLBACK_THRESHOLD) {
+
+  // 快速路径：规则引擎对标准文书足够确信（≥0.75 且为具体类别）→ 离线直接采用，省 LLM 调用
+  if (ruleResult.category !== '其他' && ruleResult.confidence >= FAST_PATH_THRESHOLD) {
     return ruleResult
   }
+
+  // 复杂材料 / 低置信度 / 规则判为“其他” → 交给语义 LLM 判定（带超时，超时回退规则结果）
   const llmResult = await Promise.race([
-    classifyWithLlmFallback(materialId, text),
+    classifyWithLlm(materialId, text),
     new Promise<{ category: string; confidence: number }>((resolve) =>
-      setTimeout(() => resolve({ category: '', confidence: 0 }), LLM_FALLBACK_TIMEOUT_MS)
+      setTimeout(() => resolve({ category: '', confidence: 0 }), LLM_TIMEOUT_MS)
     ),
   ])
   return llmResult.category ? llmResult : ruleResult
