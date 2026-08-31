@@ -1,8 +1,10 @@
 """本地向量知识库 — BGE-small-zh + LanceDB 索引"""
 
+import hashlib
 import os
 import json
 import sqlite3
+import numpy as np
 from typing import TypedDict
 
 from app.config import VECTOR_DIR
@@ -22,6 +24,7 @@ class SearchResult(TypedDict):
 
 # 全局缓存
 _embedding_model = None
+_reranker_model = None
 _lancedb_table = None
 
 
@@ -61,6 +64,32 @@ def _get_model():
         except Exception as e:
             raise RuntimeError(f"无法加载嵌入模型: {e}") from e
     return _embedding_model
+
+
+def _get_reranker():
+    """懒加载 BGE Cross-Encoder 重排模型（精排阶段，联合打分 query↔doc）
+
+    bge-reranker-base 约 2.8 亿参数 / 1.1GB，本地单机的质量-速度最优点。
+    首次调用需下载；加载失败时由调用方捕获并回退到向量+关键词排序。
+    """
+    global _reranker_model
+    if _reranker_model is None:
+        from sentence_transformers import CrossEncoder
+
+        # 优先本地模型（ModelScope 下载，目录结构与 embedding 模型一致）
+        local_model_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "data", "models", "models", "BAAI--bge-reranker-base", "snapshots", "master"
+        )
+        if os.path.exists(local_model_path):
+            _reranker_model = CrossEncoder(local_model_path, max_length=512)
+        else:
+            _reranker_model = CrossEncoder(
+                "BAAI/bge-reranker-base",
+                max_length=512,
+                cache_folder=os.path.join(os.path.dirname(VECTOR_DIR), "models"),
+            )
+    return _reranker_model
 
 
 def _get_table():
@@ -110,19 +139,39 @@ def _fetch_law_articles() -> list[dict]:
     """).fetchall()
     conn.close()
 
-    return [
-        {
-            "id": f"law:{row[1]}:{row[2] or '0'}",
-            "source_type": "law",
-            "source_id": row[0],
-            "title": row[4],
-            # 标题+条号进索引文本：跨法规同名条文可区分，法名查询可召回
-            "text": f"《{row[4]}》{row[2] or ''}: {row[3]}",
-            "law_id": row[1],
-            "article_id": row[0],
-        }
-        for row in rows
-    ]
+    results = []
+    for row in rows:
+        article_id, law_id, article_num, content, law_title = row[0], row[1], row[2] or '', row[3], row[4]
+        prefix = f"《{law_title}》{article_num}"
+        base_id = f"law:{law_id}:{article_num or '0'}"
+
+        # 长条文分块：BGE 嵌入窗口 512 token(≈700 汉字)，超窗会被截断→尾部永久漏检。
+        # 每块保留《法名》第X条前缀，使各块可独立召回且可归属到条文。
+        if len(content) > 450:
+            chunks = _split_text(content, chunk_size=400, overlap=80)
+            for i, ch in enumerate(chunks):
+                suffix = f":chunk{i}" if len(chunks) > 1 else ""
+                results.append({
+                    "id": f"{base_id}{suffix}",
+                    "source_type": "law",
+                    "source_id": article_id,
+                    "title": law_title,
+                    "text": f"{prefix}: {ch}",
+                    "law_id": law_id,
+                    "article_id": article_id,
+                })
+        else:
+            results.append({
+                "id": base_id,
+                "source_type": "law",
+                "source_id": article_id,
+                "title": law_title,
+                # 标题+条号进索引文本：跨法规同名条文可区分，法名查询可召回
+                "text": f"{prefix}: {content}",
+                "law_id": law_id,
+                "article_id": article_id,
+            })
+    return results
 
 
 # BGE v1.5 官方查询指令（仅查询侧使用，文档侧不加）
@@ -256,6 +305,17 @@ def rebuild_index() -> dict:
     if not data_sources:
         return {"doc_count": 0, "message": "没有可索引的数据"}
 
+    # 同一文件重复上传会产生 id 不同但内容相同的块，按文本去重只索引一份
+    _seen_text: set[str] = set()
+    unique_sources = []
+    for d in data_sources:
+        tk = hashlib.md5(d["text"].strip().encode("utf-8")).hexdigest()
+        if tk in _seen_text:
+            continue
+        _seen_text.add(tk)
+        unique_sources.append(d)
+    data_sources = unique_sources
+
     # 批量生成向量
     texts = [d["text"] for d in data_sources]
     embeddings = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
@@ -372,6 +432,83 @@ def search_similar(query: str, top_k: int = 10) -> list[SearchResult]:
             distance=r.get("_distance", 0),
         )
         for r in results
+    ]
+
+
+def rerank(query: str, candidates: list[SearchResult], top_n: int = 10) -> list[SearchResult]:
+    """Cross-Encoder 精排：对 (query, doc) 联合打分，语义理解远强于独立编码的向量。
+
+    candidates 为召回池（向量+关键词的并集）。按重排分降序取 top_n。
+    重排模型不可用（未下载/加载失败）时原样返回 candidates，优雅降级。
+    """
+    if not candidates:
+        return candidates
+    try:
+        model = _get_reranker()
+    except Exception:
+        return candidates
+
+    pairs = [[query, (c.get("text") or "")[:400]] for c in candidates]
+    try:
+        scores = model.predict(pairs, show_progress_bar=False)
+    except Exception:
+        return candidates
+
+    # 按重排分降序取 top_n，把分数附到块上（供上层做相关性阈值过滤）
+    order = sorted(range(len(candidates)), key=lambda i: scores[i], reverse=True)
+    out = []
+    for i in order[:top_n]:
+        c = dict(candidates[i])
+        c["rerank_score"] = round(float(scores[i]), 4)
+        out.append(c)
+    return out
+
+
+def keyword_recall(keywords: list[str], top_k: int = 20) -> list[SearchResult]:
+    """关键词召回通道：全文匹配含关键词的块，补足向量语义漏召。
+
+    法规条文措辞密集，查询与原文词汇重叠时此通道可把相关块拉进召回池，
+    交给重排器精排。本地数据量小（数千条），全表过滤开销可接受。
+    """
+    if not keywords:
+        return []
+    table = _get_table()
+    try:
+        df = table.to_pandas()
+    except Exception:
+        return []
+    if df.empty:
+        return []
+
+    text = df["text"].fillna("")
+    title = df["title"].fillna("")
+    # 命中关键词数越多越相关
+    hit_counts = np.zeros(len(df))
+    for kw in keywords:
+        k = kw.lower()
+        if len(k) < 2:
+            continue
+        hit_counts += text.str.lower().str.contains(k, regex=False).to_numpy() + \
+            title.str.lower().str.contains(k, regex=False).to_numpy()
+
+    mask = hit_counts > 0
+    if not mask.any():
+        return []
+    idx = np.argsort(-hit_counts, kind="stable")[:top_k]
+    idx = [i for i in idx if mask[i]]
+
+    return [
+        SearchResult(
+            id=df["id"].iloc[i],
+            source_type=df["source_type"].iloc[i],
+            title=df["title"].iloc[i],
+            text=df["text"].iloc[i],
+            law_id=df["law_id"].iloc[i] if df["law_id"].iloc[i] else None,
+            article_id=df["article_id"].iloc[i] if df["article_id"].iloc[i] else None,
+            # 归一化：命中数越多 distance 越小（相关度越高）
+            distance=round(1.0 - hit_counts[i] / max(hit_counts.max(), 1), 4),
+        )
+        for i in idx
     ]
 
 

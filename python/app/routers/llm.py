@@ -191,7 +191,7 @@ async def rag_ask(req: RagAskRequest):
         return {"answer": "请输入问题", "sources": [], "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
 
     # 使用新 RAG 引擎
-    from app.services.rag_engine import hybrid_search, build_rag_messages, postprocess_citations
+    from app.services.rag_engine import hybrid_search, build_rag_messages, postprocess_citations, make_snippet
 
     chunks = hybrid_search(question, top_k=req.top_k)
     messages = build_rag_messages(question, chunks)
@@ -211,10 +211,11 @@ async def rag_ask(req: RagAskRequest):
         "answer": answer,
         "sources": [
             {"id": s.get("id", ""), "source_type": s.get("source_type", ""),
-             "title": s.get("title", ""), "snippet": s.get("text", "")[:200],
+             "title": s.get("title", ""),
+             "snippet": make_snippet(s.get("text", ""), question, answer, i + 1),
              "law_id": s.get("law_id"), "article_id": s.get("article_id"),
              "score": round(s.get("score", 0), 3)}
-            for s in chunks
+            for i, s in enumerate(chunks)
         ],
         "usage": usage,
     }
