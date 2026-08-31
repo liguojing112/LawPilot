@@ -327,6 +327,7 @@ export interface CaseRow {
   case_status: string
   court: string | null
   client: string | null
+  opponent: string | null
   filing_date: string | null
   description: string | null
   volume_order: string | null
@@ -814,6 +815,8 @@ export interface MaterialRow {
   ocr_error: string | null
   category: string
   category_confidence: number
+  evidence_no: string
+  proof_purpose: string
   page_count: number
   created_at: string
 }

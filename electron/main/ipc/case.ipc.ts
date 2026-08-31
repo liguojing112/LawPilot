@@ -175,7 +175,7 @@ export function registerCaseIpc(): void {
 
     // 计页：预估每份材料所占领的 PDF 页数（用于目录页码）
     // 文本按 splitTextToSize 算行数 → 页数；图片固定 1 页；无内容 1 页
-    function estimateMaterialPages(m: typeof sorted[number]): number {
+    function estimateMaterialPages(m: NonNullable<typeof sorted>[number]): number {
       if (m.raw_text) {
         const lines = doc.splitTextToSize(m.raw_text, 170) as string[]
         const perPage = Math.floor(260 / 5) // 每页约52行
