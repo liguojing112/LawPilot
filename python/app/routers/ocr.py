@@ -61,25 +61,55 @@ def _extract_image(file_path: str) -> tuple[str, int]:
         raise RuntimeError(f"OCR 处理失败: {e}") from e
 
 
+def _ocr_pdf_pages(file_path: str, page_indices: list[int]) -> dict[int, str]:
+    """把 PDF 指定页渲染成图片逐页 OCR（扫描件降级路径），返回 页下标->文本"""
+    import shutil
+    import tempfile
+
+    import pypdfium2 as pdfium
+
+    results: dict[int, str] = {}
+    doc = pdfium.PdfDocument(file_path)
+    tmpdir = tempfile.mkdtemp(prefix="lawpilot_ocr_")
+    try:
+        for i in page_indices:
+            img_path = os.path.join(tmpdir, f"page_{i}.png")
+            try:
+                page = doc[i]
+                pil_image = page.render(scale=2.0).to_pil()
+                pil_image.save(img_path)
+                text, _ = _extract_image(img_path)
+                results[i] = text
+            except Exception:
+                results[i] = ""
+    finally:
+        doc.close()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    return results
+
+
 def _extract_pdf(file_path: str) -> tuple[str, int]:
-    """使用 pdfplumber 提取 PDF 文本"""
+    """PDF 提取：优先各页文本层；无文本层的扫描页渲染成图片 OCR（支持全部页）"""
     try:
         import pdfplumber
 
         with pdfplumber.open(file_path) as pdf:
-            pages = []
-            for page in pdf.pages:
-                text = page.extract_text()
-                if text:
-                    pages.append(text)
-            text = "\n\n".join(pages)
+            n = len(pdf.pages)
+            page_texts = [(page.extract_text() or "").strip() for page in pdf.pages]
 
-            # 如果没有提取到文本，可能是扫描件，降级使用 OCR
-            if not text.strip():
-                # 将 PDF 第一页转图片后 OCR（简单降级方案）
-                return _extract_image(file_path)
+        ocr_needed = [i for i, t in enumerate(page_texts) if not t]
+        if ocr_needed:
+            try:
+                ocr_map = _ocr_pdf_pages(file_path, ocr_needed)
+            except Exception:
+                # pypdfium2 不可用/渲染失败：退回旧方案（整份 PDF 交给 PaddleOCR，通常只处理第一页）
+                first, _ = _extract_image(file_path)
+                ocr_map = {i: (first if i == ocr_needed[0] else "") for i in ocr_needed}
+            for i in ocr_needed:
+                page_texts[i] = ocr_map.get(i, "")
 
-            return text, len(pdf.pages)
+        text = "\n\n".join(t for t in page_texts if t)
+        return text, n
     except ImportError:
         return "[pdfplumber 未安装]", 1
     except Exception as e:
