@@ -184,6 +184,41 @@ async def simple_chat(req: ChatRequest):
     return {"content": content}
 
 
+def _link_law_for_material(title: str, values: list[int]) -> tuple[str | None, str | None]:
+    """材料来源与已导入法规同名时补出 law_id/article_id，恢复"查看条款"跳转。
+
+    同一法规常被既导入法规库又上传 .txt，答案引用的是材料块（无 law_id），
+    不关联的话前端跳转按钮会消失；article_id 取答案实际引用的第一条，跳过去直接选中。"""
+    base = re.sub(r'\s*\([^)]*\)\s*$', '', title or '')
+    base = re.sub(r'\.(txt|docx?|pdf|md)$', '', base, flags=re.I).strip()
+    if not base:
+        return None, None
+    try:
+        conn = sqlite3.connect(_find_db_path())
+        row = conn.execute("SELECT id FROM laws WHERE title = ?", (base,)).fetchone()
+        if not row:
+            return None, None
+        law_id = row[0]
+        article_id = None
+        if values:
+            from app.services.rag_engine import article_num_value
+            for aid, anum in conn.execute(
+                "SELECT id, article_num FROM articles WHERE law_id = ? AND article_num IS NOT NULL AND article_num != ''",
+                (law_id,),
+            ).fetchall():
+                if article_num_value(anum) in values:
+                    article_id = aid
+                    break
+        return law_id, article_id
+    except Exception:
+        return None, None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 @router.post("/rag-ask")
 async def rag_ask(req: RagAskRequest):
     question = req.question.strip()
@@ -191,7 +226,10 @@ async def rag_ask(req: RagAskRequest):
         return {"answer": "请输入问题", "sources": [], "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
 
     # 使用新 RAG 引擎
-    from app.services.rag_engine import hybrid_search, build_rag_messages, postprocess_citations, make_snippet
+    from app.services.rag_engine import (
+        hybrid_search, build_rag_messages, postprocess_citations,
+        make_snippet, fix_citation_attribution, cited_article_values,
+    )
 
     chunks = hybrid_search(question, top_k=req.top_k)
     messages = build_rag_messages(question, chunks)
@@ -204,27 +242,36 @@ async def rag_ask(req: RagAskRequest):
 
     answer, usage = await _call_llm(masked, 0.3, 8192, return_usage=True)
 
-    # 后处理引用
+    # 后处理引用 + 纠正错标的来源归属
     answer = postprocess_citations(answer, chunks)
+    answer = fix_citation_attribution(answer, chunks)
 
-    return {
-        "answer": answer,
-        "sources": [
-            {"id": s.get("id", ""), "source_type": s.get("source_type", ""),
-             "title": s.get("title", ""),
-             "snippet": make_snippet(s.get("text", ""), question, answer, i + 1),
-             "law_id": s.get("law_id"), "article_id": s.get("article_id"),
-             "score": round(s.get("score", 0), 3)}
-            for i, s in enumerate(chunks)
-        ],
-        "usage": usage,
-    }
+    # 只展示答案实际引用的来源（未引用的是检索噪声）；完全无引用标记时保留全部兜底
+    cited = {int(n) for n in re.findall(r'\[来源(\d+)\]', answer)}
+    sources = []
+    for i, s in enumerate(chunks):
+        if cited and (i + 1) not in cited:
+            continue
+        law_id = s.get("law_id")
+        article_id = s.get("article_id")
+        if not law_id and s.get("source_type") == "material":
+            law_id, article_id = _link_law_for_material(
+                s.get("title", ""), cited_article_values(answer, i + 1))
+        sources.append({
+            "index": i + 1,
+            "id": s.get("id", ""), "source_type": s.get("source_type", ""),
+            "title": s.get("title", ""),
+            "snippet": make_snippet(s.get("text", ""), question, answer, i + 1),
+            "law_id": law_id, "article_id": article_id,
+            "score": round(s.get("score", 0), 3),
+        })
+    return {"answer": answer, "sources": sources, "usage": usage}
 
 
 @router.post("/report")
 async def generate_report(req: ReportRequest):
-    if not req.materials_text.strip():
-        return {"content": "请先导入尽调资料"}
+    if not req.materials_text.strip() and not (req.risk_points or "").strip():
+        return {"content": "请先导入尽调资料或填写风险点"}
 
     project_info = ""
     if req.target_company or req.client or req.scope:
@@ -235,8 +282,12 @@ async def generate_report(req: ReportRequest):
             f"- 尽调范围: {req.scope or '（未提供）'}\n"
         )
 
+    from datetime import datetime
+
+    today = datetime.now().strftime("%Y年%m月%d日")
+    materials = req.materials_text.strip() or "（未提供文件材料，仅依据下方风险点提示）"
     prompt = (
-        "你是资深执业律师，请根据以下尽调资料生成一份《法律尽职调查报告》。\n\n"
+        f"你是资深执业律师，请根据以下尽调资料生成一份《法律尽职调查报告》。报告出具日期一律使用：{today}。\n\n"
         + project_info
         + "报告应包含:\n## 一、引言\n（目的、范围、方法）\n\n"
         "## 二、公司概况\n（基本信息、股权结构、历史沿革）\n\n"
@@ -246,9 +297,9 @@ async def generate_report(req: ReportRequest):
         "## 六、诉讼与仲裁\n（涉案情况、执行、失信记录）\n\n"
         "## 七、风险评估\n（法律风险、合规风险、经营风险及等级）\n\n"
         "## 八、结论与建议\n（总体评价、建议措施）\n\n"
-        f"尽调资料:\n{req.materials_text[:8000]}\n\n"
-        f"关键风险点:\n{req.risk_points or '（无特别提示）'}\n\n"
-        "请用中文 Markdown 格式输出完整报告。"
+        f"尽调资料:\n{materials[:8000]}\n\n"
+        f"关键风险点:\n{req.risk_points.strip() or '（无特别提示）'}\n\n"
+        "请用中文 Markdown 格式输出完整报告。只输出一次，禁止重复输出报告正文。"
     )
     level = _get_ai_config().get("privacy_level", "standard")
     r = mask_text(prompt, level=level)
