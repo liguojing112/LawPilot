@@ -234,31 +234,53 @@ def _window_around(text: str, pos: int, width: int = 200) -> str:
     return prefix + text[start:end] + suffix
 
 
+def _extract_articles(s: str) -> list[str]:
+    """从文本提取条款号，兼容"第四条""第四、五条""第四条和第五条""第十二、十三条"等写法"""
+    arts: list[str] = []
+    for m in re.finditer(r'第([一二三四五六七八九十百千零\d、和及与]+?)条', s):
+        inner = m.group(1)
+        for part in re.split(r'[、和及与]', inner):
+            part = part.strip()
+            if part:
+                full = f"第{part}条"
+                if full not in arts:
+                    arts.append(full)
+    return arts
+
+
 def make_snippet(text: str, question: str, answer: str, source_index: int, width: int = 200) -> str:
     """为参考来源生成摘要，优先对齐答案实际引用的条款。
 
     固定取前 200 字时，被引用的条款若不在块首，用户看到的预览就和引用对不上。
-    优先级：答案中与该来源同句的条款号 > 问题关键词最后一次出现位置 > 块首。
+    优先级：答案中引用本来源的条款号(兼容合并写法) > 答案全文里确实存在于本块的条款
+            > 问题关键词最后一次出现位置 > 块首。
     """
     if not text:
         return ""
     if len(text) <= width:
         return text.replace("\n", " ")
 
-    # 1) 答案里引用了该来源的句子中出现过的条款号
+    # 1) 答案引用了本来源的句子中出现过的条款号（标记邻域放宽到 ±120，兼容"…第四条、第五条[来源1]"）
     marker = f"[来源{source_index}]"
     cited: list[str] = []
-    for m in re.finditer(re.escape(marker), answer):
-        seg = answer[max(0, m.start() - 80): m.end() + 20]
-        for a in re.findall(r'第[一二三四五六七八九十百千零\d]+条', seg):
-            if a not in cited:
+    if marker in answer:
+        for m in re.finditer(re.escape(marker), answer):
+            seg = answer[max(0, m.start() - 120): m.end() + 120]
+            for a in _extract_articles(seg):
+                if a not in cited:
+                    cited.append(a)
+    # 2) 标记邻域没找到，则用"答案全文里确实出现在本块文本中的条款"兜底
+    #    （处理答案把条款号写在离来源标记较远、或同一来源被多次改写引用的场景）
+    if not cited:
+        for a in _extract_articles(answer):
+            if a in text and a not in cited:
                 cited.append(a)
     for a in cited:
         pos = text.find(a)
         if pos >= 0:
             return _window_around(text, pos, width).replace("\n", " ")
 
-    # 2) 问题关键词（取块内最后一次出现，通常靠近块的相关段落）
+    # 3) 问题关键词（取块内最后一次出现，通常靠近块的相关段落）
     for kw in reversed(_extract_keywords(question)):
         if len(kw) < 2:
             continue
@@ -266,7 +288,7 @@ def make_snippet(text: str, question: str, answer: str, source_index: int, width
         if pos >= 0:
             return _window_around(text, pos, width).replace("\n", " ")
 
-    # 3) 兜底
+    # 4) 兜底
     return text[:width].replace("\n", " ")
 
 
