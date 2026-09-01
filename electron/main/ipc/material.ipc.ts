@@ -60,10 +60,11 @@ export function registerMaterialIpc(): void {
             file_size: size,
           })
 
-          results.push({ material })
-
-          // 异步执行 OCR/文本提取
-          processMaterialAsync(material.id, fp, ext, window)
+          // 等 OCR/文本提取+分类完成后返回完整行。
+          // 原先异步返回时 raw_text 恒为 null，尽调页的材料池会静默丢文件
+          await processMaterialAsync(material.id, fp, ext, window)
+          const doneMaterial = getMaterialById(material.id) || material
+          results.push({ material: doneMaterial })
         } catch (err) {
           results.push({ material: null, error: (err as Error).message })
         }

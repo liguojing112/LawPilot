@@ -43,6 +43,8 @@ export function DdWorkspace() {
     if (m.raw_text) {
       setMaterialsText((prev) => prev + `\n\n【${m.original_name}】\n${m.raw_text?.slice(0, 2000) || ''}`)
       message.success(`已添加材料: ${m.original_name}`)
+    } else {
+      message.warning(`材料"${m.original_name}"未提取到文本（扫描件 OCR 失败或服务未启动），已跳过`)
     }
   }
 
@@ -73,7 +75,7 @@ export function DdWorkspace() {
       <Row gutter={16} className="mb-4">
         <Col span={12}>
           <Card title="材料上传" size="small">
-            <FileDropZone storageKey="lawpilot:dd-upload" onMaterialProcessed={handleMaterialProcessed} />
+            <FileDropZone storageKey="lawpilot:dd-upload" restoreProcessed onMaterialProcessed={handleMaterialProcessed} />
           </Card>
         </Col>
         <Col span={12}>

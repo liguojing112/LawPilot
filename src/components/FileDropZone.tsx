@@ -35,6 +35,13 @@ interface Props {
   onMaterialProcessed?: (item: MaterialRow) => void
   /** 页面作用域的 localStorage key，用于切换页面后恢复文件列表（避免跨页面串场） */
   storageKey?: string
+  /**
+   * 挂载时把已恢复的"完成"材料重新回调给父组件（从 DB 读取最新行）。
+   * 供尽调页这类需要"材料文本池"的页面使用：切走再回来时文本池是内存态会清空，
+   * 但文件列表恢复了，不重放就会出现"文件显示完成、文本却是空的"。
+   * 案件列表/详情等回调有副作用的页面不要开（会重复跳转/重复关联）。
+   */
+  restoreProcessed?: boolean
 }
 
 function getFileIcon(name: string) {
@@ -53,7 +60,7 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-export function FileDropZone({ cases = [], onMaterialProcessed, storageKey }: Props) {
+export function FileDropZone({ cases = [], onMaterialProcessed, storageKey, restoreProcessed = false }: Props) {
   const [files, setFiles] = useState<FileItem[]>(() => {
     if (!storageKey) return []
     try {
@@ -78,11 +85,15 @@ export function FileDropZone({ cases = [], onMaterialProcessed, storageKey }: Pr
   }, [files, storageKey])
 
   // 挂载时同步恢复的文件真实状态（切走时若正在处理，回来应更新为实际结果）
+  // restoreProcessed 时，把已完成的材料从 DB 重新回调给父组件（文本池类页面切走再回来不丢文本）
   useEffect(() => {
     if (!storageKey || files.length === 0) return
     let cancelled = false
     const syncIds = files.filter((f) => f.status === 'processing' || f.status === 'pending').map((f) => f.id)
-    if (syncIds.length === 0) return
+    const restoreIds = restoreProcessed
+      ? files.filter((f) => f.status === 'done' && !f.id.startsWith('temp_')).map((f) => f.id)
+      : []
+    if (syncIds.length === 0 && restoreIds.length === 0) return
     ;(async () => {
       const updates: Record<string, { status: FileItem['status']; category?: string; error?: string }> = {}
       for (const id of syncIds) {
@@ -103,6 +114,16 @@ export function FileDropZone({ cases = [], onMaterialProcessed, storageKey }: Pr
       setFiles((prev) =>
         prev.map((f) => (updates[f.id] ? { ...f, ...updates[f.id] } : f))
       )
+      for (const id of restoreIds) {
+        try {
+          const m = await window.api.material.get(id)
+          if (m && m.ocr_status === 'done' && m.raw_text) {
+            onMaterialProcessed?.(m)
+          }
+        } catch {
+          // 忽略单个查询失败
+        }
+      }
     })()
     return () => { cancelled = true }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
