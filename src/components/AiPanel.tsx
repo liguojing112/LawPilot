@@ -97,8 +97,15 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
       .listConversations()
       .then((list) => {
         const conv = list.find((c) => c.id === activeId)
-        setMessages(conv ? safeParseMessages(conv.messages) : [])
-        setRagSources(null)
+        const msgs = conv ? safeParseMessages(conv.messages) : []
+        setMessages(msgs)
+        // 参考来源随最后一条 RAG 回答一起恢复（来源快照存在消息里）
+        const last = msgs[msgs.length - 1]
+        setRagSources(
+          last && last.role === 'assistant' && last.sources && last.sources.length > 0
+            ? { answer: last.content, sources: last.sources }
+            : null,
+        )
       })
       .catch(() => setMessages([]))
   }, [activeId, open])
@@ -211,6 +218,7 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
           role: 'assistant',
           content: result.answer,
           timestamp: new Date().toISOString(),
+          sources: result.sources,
         }
         finalMessages = [...history, assistantMsg]
         setMessages(finalMessages)
@@ -312,6 +320,7 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
           role: 'assistant',
           content: result.answer,
           timestamp: new Date().toISOString(),
+          sources: result.sources,
         }
         finalMessages = [...history, assistantMsg]
         setMessages(finalMessages)
@@ -384,6 +393,7 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
           role: 'assistant',
           content: result.answer,
           timestamp: new Date().toISOString(),
+          sources: result.sources,
         }
         finalMessages = [...newMessages, assistantMsg]
         setMessages(finalMessages)
@@ -611,6 +621,7 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
                   {ragSources.sources.map((s, i) => (
                     <div key={s.id || i} className="text-xs">
                       <div className="flex items-center gap-2">
+                        <Tag color="blue" style={{ marginInlineEnd: 0 }}>来源{s.index ?? i + 1}</Tag>
                         <Tag style={{ marginInlineEnd: 0 }}>{s.source_type || '资料'}</Tag>
                         <Text>{s.title || '未命名'}</Text>
                         {s.law_id && (

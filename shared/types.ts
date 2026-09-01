@@ -277,10 +277,13 @@ export interface LlmMessage {
 export interface ChatMessage extends LlmMessage {
   timestamp: string
   tokenCount?: number
+  /** RAG 回答附带的来源快照，用于切页/重开面板后恢复"参考来源"卡片 */
+  sources?: RagSource[]
 }
 
 /** RAG 检索来源（law_id 非空时可跳转法规条款） */
 export interface RagSource {
+  index?: number
   id: string
   source_type: string
   title: string
