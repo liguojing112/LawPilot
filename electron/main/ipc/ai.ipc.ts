@@ -143,7 +143,8 @@ export function registerAiIpc(): void {
           content: string
           usage?: { prompt_tokens: number; completion_tokens: number }
         }>('/llm/report', {
-          materials_text: d.materials_text || String(data),
+          // 不能兜底 String(data)：materials_text 为空时会产生 "[object Object]" 混进提示词
+          materials_text: d.materials_text || '',
           risk_points: d.risk_points || '',
           report_type: template,
           target_company: d.target_company || '',
