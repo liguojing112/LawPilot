@@ -25,6 +25,13 @@ export function LawDetailPage() {
 
   const highlightArticleId = searchParams.get('article') || undefined
 
+  // 从 RAG"查看条款"跳转来时，自动选中该条款（否则右侧空白，必须手动点左侧树）
+  useEffect(() => {
+    if (!law || !highlightArticleId) return
+    const target = law.articles.find((a) => a.id === highlightArticleId)
+    if (target) setSelectedArticle(target)
+  }, [law, highlightArticleId])
+
   useEffect(() => {
     if (!id) return
     setLoading(true)
