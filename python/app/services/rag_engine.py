@@ -234,6 +234,28 @@ def _window_around(text: str, pos: int, width: int = 200) -> str:
     return prefix + text[start:end] + suffix
 
 
+_ART_NUM = r'[零一二两三四五六七八九十百千\d]+'
+_ARTICLE_RE = re.compile(rf'第({_ART_NUM})条')
+_CN_DIGITS = {'零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
+_CN_UNITS = {'十': 10, '百': 100, '千': 1000}
+
+
+def _article_value(s: str) -> int | None:
+    """条款号转数值：'四十二'/'42'/'十五' -> 42/42/15；无法解析返回 None"""
+    if s.isdigit():
+        return int(s)
+    total, num = 0, 0
+    for ch in s:
+        if ch in _CN_DIGITS:
+            num = _CN_DIGITS[ch]
+        elif ch in _CN_UNITS:
+            total += (num if num else 1) * _CN_UNITS[ch]
+            num = 0
+        else:
+            return None
+    return total + num
+
+
 def _extract_articles(s: str) -> list[str]:
     """从文本提取条款号，兼容"第四条""第四、五条""第四条和第五条""第十二、十三条"等写法"""
     arts: list[str] = []
@@ -248,6 +270,32 @@ def _extract_articles(s: str) -> list[str]:
     return arts
 
 
+def _find_article_pos(text: str, num_str: str) -> int:
+    """定位与 num_str 数值相同的"第X条"。LLM 可能写"第4条"而原文是"第四条"，
+    必须按数值匹配，否则锚定失败退到关键词兜底、窗口落错位置"""
+    target = _article_value(num_str)
+    if target is None:
+        return text.find(f'第{num_str}条')
+    for m in _ARTICLE_RE.finditer(text):
+        if _article_value(m.group(1)) == target:
+            return m.start()
+    return -1
+
+
+def _marker_segments(answer: str) -> list[tuple[int, int, str]]:
+    """每个 [来源N] 标记及其归属段落段 (source_index, marker_start, segment)。
+
+    回看必须切断在上一段落换行（\\n\\n）处：编号列表的每项是独立段落，
+    若只看固定 80 字，会把上一项的条款号带进本项标记的判定，
+    导致把正确的引用改错（实测 [来源5] 第六条 被误改成 [来源1]）。
+    """
+    out: list[tuple[int, int, str]] = []
+    for m in re.finditer(r'\[来源(\d+)\]', answer):
+        start = max(m.start() - 80, answer.rfind('\n\n', 0, m.start()) + 1)
+        out.append((int(m.group(1)), m.start(), answer[start: m.end() + 20]))
+    return out
+
+
 def make_snippet(text: str, question: str, answer: str, source_index: int, width: int = 200) -> str:
     """为参考来源生成摘要，优先对齐答案实际引用的条款。
 
@@ -260,23 +308,21 @@ def make_snippet(text: str, question: str, answer: str, source_index: int, width
     if len(text) <= width:
         return text.replace("\n", " ")
 
-    # 1) 答案引用了本来源的句子中出现过的条款号（标记邻域放宽到 ±120，兼容"…第四条、第五条[来源1]"）
-    marker = f"[来源{source_index}]"
+    # 1) 答案里引用了该来源的段落中出现过的条款号（兼容中文/阿拉伯数字、标记前置/后置）
     cited: list[str] = []
-    if marker in answer:
-        for m in re.finditer(re.escape(marker), answer):
-            seg = answer[max(0, m.start() - 120): m.end() + 120]
-            for a in _extract_articles(seg):
-                if a not in cited:
-                    cited.append(a)
-    # 2) 标记邻域没找到，则用"答案全文里确实出现在本块文本中的条款"兜底
-    #    （处理答案把条款号写在离来源标记较远、或同一来源被多次改写引用的场景）
+    for idx, _, seg in _marker_segments(answer):
+        if idx != source_index:
+            continue
+        for a in _extract_articles(seg):
+            if a not in cited:
+                cited.append(a)
+    # 2) 段落边界内没找到，则用"答案全文里确实出现在本块文本中的条款"兜底
     if not cited:
         for a in _extract_articles(answer):
             if a in text and a not in cited:
                 cited.append(a)
     for a in cited:
-        pos = text.find(a)
+        pos = _find_article_pos(text, a)
         if pos >= 0:
             return _window_around(text, pos, width).replace("\n", " ")
 
@@ -290,6 +336,58 @@ def make_snippet(text: str, question: str, answer: str, source_index: int, width
 
     # 4) 兜底
     return text[:width].replace("\n", " ")
+
+
+def article_num_value(num_str: str) -> int | None:
+    """'第十四条'/'第4条'/'十四' -> 14/4/14；无法解析返回 None"""
+    m = _ARTICLE_RE.search(num_str or "")
+    if m:
+        return _article_value(m.group(1))
+    return _article_value((num_str or "").strip())
+
+
+def cited_article_values(answer: str, source_index: int) -> list[int]:
+    """答案中与该来源标记同段出现的条款号数值列表（供材料来源关联法规跳转用）"""
+    vals: list[int] = []
+    for idx, _, seg in _marker_segments(answer):
+        if idx != source_index:
+            continue
+        for a in _ARTICLE_RE.findall(seg):
+            v = _article_value(a)
+            if v is not None and v not in vals:
+                vals.append(v)
+    return vals
+
+
+def fix_citation_attribution(answer: str, chunks: list[RagChunk]) -> str:
+    """校验 [来源N] 与该处提及条款号的归属：条款不在 N 号块、但唯一存在于 M 号块时，
+    把该标记改到 [来源M]。LLM 常把相邻块的条款错标到主引用块上（如第六条标给只含
+    第四/五条的块1），不纠正会让用户核对时发现"来源里没有这条"。"""
+    if not answer or not chunks:
+        return answer
+    edits: list[tuple[int, int, str]] = []
+    for n, m_start, seg in _marker_segments(answer):
+        if not (1 <= n <= len(chunks)):
+            continue
+        for a in _ARTICLE_RE.findall(seg):
+            if _find_article_pos(chunks[n - 1].get("text") or "", a) >= 0:
+                continue  # 该条款归属正确，继续检查段内其他条款
+            holders = [
+                (j + 1, c.get("score", 0)) for j, c in enumerate(chunks)
+                if _find_article_pos(c.get("text") or "", a) >= 0
+            ]
+            # 多个块都含该条款时取精排分最高的（材料块与法规块重复收录同一法时常见）
+            if holders:
+                best = max(holders, key=lambda t: t[1])[0]
+                if best != n:
+                    edits.append((m_start, m_start + len(f"[来源{n}]"), f"[来源{best}]"))
+            break  # 每个标记只做一次改判
+    fixed = answer
+    for start, end, repl in sorted(edits, reverse=True):
+        fixed = fixed[:start] + repl + fixed[end:]
+    # 相邻标记被改判到同一来源时合并（[来源5][来源5] -> [来源5]）
+    fixed = re.sub(r'(\[来源\d+\])(?:\1)+', r'\1', fixed)
+    return fixed
 
 
 # ─── 引用后处理 ───────────────────────────────────────────────
