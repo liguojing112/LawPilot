@@ -42,6 +42,12 @@ interface Props {
    * 案件列表/详情等回调有副作用的页面不要开（会重复跳转/重复关联）。
    */
   restoreProcessed?: boolean
+  /**
+   * 恢复已完成材料时的静默回调（文本池重放）。
+   * 父组件应幂等处理（已含该材料则跳过）且不要弹成功提示——
+   * StrictMode 下挂载 effect 会双跑，弹 toast 会出现重复提示框。
+   */
+  onMaterialRestored?: (item: MaterialRow) => void
 }
 
 function getFileIcon(name: string) {
@@ -60,7 +66,7 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-export function FileDropZone({ cases = [], onMaterialProcessed, storageKey, restoreProcessed = false }: Props) {
+export function FileDropZone({ cases = [], onMaterialProcessed, storageKey, restoreProcessed = false, onMaterialRestored }: Props) {
   const [files, setFiles] = useState<FileItem[]>(() => {
     if (!storageKey) return []
     try {
@@ -91,7 +97,7 @@ export function FileDropZone({ cases = [], onMaterialProcessed, storageKey, rest
     let cancelled = false
     const syncIds = files.filter((f) => f.status === 'processing' || f.status === 'pending').map((f) => f.id)
     const restoreIds = restoreProcessed
-      ? files.filter((f) => f.status === 'done' && !f.id.startsWith('temp_')).map((f) => f.id)
+      ? Array.from(new Set(files.filter((f) => f.status === 'done' && !f.id.startsWith('temp_')).map((f) => f.id)))
       : []
     if (syncIds.length === 0 && restoreIds.length === 0) return
     ;(async () => {
@@ -118,7 +124,7 @@ export function FileDropZone({ cases = [], onMaterialProcessed, storageKey, rest
         try {
           const m = await window.api.material.get(id)
           if (m && m.ocr_status === 'done' && m.raw_text) {
-            onMaterialProcessed?.(m)
+            onMaterialRestored?.(m)
           }
         } catch {
           // 忽略单个查询失败

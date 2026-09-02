@@ -13,9 +13,10 @@ import {
 } from '@ant-design/icons'
 import type { MaterialRow, CaseInfo } from '../../shared/types'
 import { EntityTags } from './EntityTags'
+import { Markdown } from './Markdown'
 import { extractEntities } from '../utils/entityExtractor'
 
-const { Title, Text, Paragraph } = Typography
+const { Title, Text } = Typography
 
 // 默认排序：程序文书 → 起诉状/答辩状 → 证据 → 判决/裁定 → 合同 → 其他
 const CATEGORY_ORDER = ['起诉状', '答辩状', '证据', '判决', '裁定', '合同', '其他']
@@ -279,12 +280,12 @@ export function VolumePreview({ caseInfo, materials, onOrderSaved }: Props) {
 
               {selectedMaterial.raw_text ? (
                 <div className="border rounded p-4 bg-gray-50">
-                  <Paragraph
-                    className="!mb-0 whitespace-pre-wrap text-sm leading-relaxed"
+                  <div
+                    className="text-sm leading-relaxed"
                     style={{ maxHeight: 'calc(100vh - 450px)', overflow: 'auto' }}
                   >
-                    {selectedMaterial.raw_text}
-                  </Paragraph>
+                    <Markdown>{selectedMaterial.raw_text}</Markdown>
+                  </div>
                 </div>
               ) : selectedMaterial.ocr_status === 'processing' ? (
                 <div className="text-center py-16">

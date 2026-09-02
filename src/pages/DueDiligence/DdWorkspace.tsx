@@ -1,51 +1,150 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Typography, Input, Button, Card, Form, Row, Col, message, Spin, Divider } from 'antd'
 import { AuditOutlined, FileTextOutlined, DownloadOutlined } from '@ant-design/icons'
 import { FileDropZone } from '../../components/FileDropZone'
+import { Markdown } from '../../components/Markdown'
 
-const { Title, Text, Paragraph } = Typography
+const { Title, Text } = Typography
 const { TextArea } = Input
 
+const PROJECT_KEY = 'lawpilot:dd-project'
+
+// 模块级状态：切换页面（组件卸载/重挂）、StrictMode 双挂载间存活，
+// 进行中的报告生成不丢；项目信息/风险点额外持久化到 localStorage
+const ddStore: {
+  materialsText: string
+  projectInfo: { targetCompany: string; client: string; scope: string }
+  riskPoints: string
+  report: string
+  generating: boolean
+  pending: Promise<string> | null
+} = {
+  materialsText: '',
+  projectInfo: { targetCompany: '', client: '', scope: '' },
+  riskPoints: '',
+  report: '',
+  generating: false,
+  pending: null,
+}
+
 export function DdWorkspace() {
-  const [projectInfo, setProjectInfo] = useState({
-    targetCompany: '',
-    client: '',
-    scope: '',
-  })
-  const [materialsText, setMaterialsText] = useState('')
-  const [riskPoints, setRiskPoints] = useState('')
-  const [report, setReport] = useState('')
-  const [generating, setGenerating] = useState(false)
+  const [projectInfo, setProjectInfo] = useState(ddStore.projectInfo)
+  const [materialsText, setMaterialsText] = useState(ddStore.materialsText)
+  const [riskPoints, setRiskPoints] = useState(ddStore.riskPoints)
+  const [report, setReport] = useState(ddStore.report)
+  const [generating, setGenerating] = useState(ddStore.generating)
+
+  // 应用重启后恢复项目信息/风险点（本会话内已有则不覆盖）
+  useEffect(() => {
+    if (ddStore.projectInfo.targetCompany || ddStore.projectInfo.client
+      || ddStore.projectInfo.scope || ddStore.riskPoints) return
+    try {
+      const saved = localStorage.getItem(PROJECT_KEY)
+      if (saved) {
+        const p = JSON.parse(saved)
+        if (p.projectInfo) ddStore.projectInfo = { ...ddStore.projectInfo, ...p.projectInfo }
+        if (typeof p.riskPoints === 'string') ddStore.riskPoints = p.riskPoints
+        setProjectInfo(ddStore.projectInfo)
+        setRiskPoints(ddStore.riskPoints)
+      }
+    } catch { /* 忽略存储异常 */ }
+  }, [])
+
+  // 切页时报告还在生成中：重挂后订阅进行中的请求，完成后回填
+  useEffect(() => {
+    if (!ddStore.pending) return
+    ddStore.pending
+      .then((r) => {
+        setReport(r)
+        setGenerating(false)
+      })
+      .catch(() => setGenerating(false))
+  }, [])
+
+  function saveProject() {
+    try {
+      localStorage.setItem(PROJECT_KEY, JSON.stringify({
+        projectInfo: ddStore.projectInfo,
+        riskPoints: ddStore.riskPoints,
+      }))
+    } catch { /* 忽略存储异常 */ }
+  }
+
+  function updateProjectInfo(v: { targetCompany: string; client: string; scope: string }) {
+    ddStore.projectInfo = v
+    setProjectInfo(v)
+    saveProject()
+  }
+
+  function updateRiskPoints(v: string) {
+    ddStore.riskPoints = v
+    setRiskPoints(v)
+    saveProject()
+  }
 
   async function handleGenerate() {
     if (!materialsText.trim() && !riskPoints.trim()) {
       message.warning('请先上传尽调材料或输入风险点')
       return
     }
+    ddStore.generating = true
+    ddStore.report = ''
     setGenerating(true)
-    try {
-      const result = await window.api.ai.generateReport('due_diligence', {
-        materials_text: materialsText,
-        risk_points: riskPoints,
-        target_company: projectInfo.targetCompany,
-        client: projectInfo.client,
-        scope: projectInfo.scope,
+    setReport('')
+    const pending = window.api.ai.generateReport('due_diligence', {
+      materials_text: materialsText,
+      risk_points: riskPoints,
+      target_company: ddStore.projectInfo.targetCompany,
+      client: ddStore.projectInfo.client,
+      scope: ddStore.projectInfo.scope,
+    })
+      .then((r) => {
+        ddStore.report = r
+        ddStore.pending = null
+        return r
       })
-      setReport(result)
+      .catch((err) => {
+        ddStore.generating = false
+        ddStore.pending = null
+        throw err
+      })
+    ddStore.pending = pending
+    try {
+      const r = await pending
+      setReport(r)
     } catch (err) {
       message.error(`生成失败: ${(err as Error).message}`)
     } finally {
+      ddStore.generating = false
       setGenerating(false)
     }
   }
 
+  // 幂等追加：文本池已含该材料（按文件名标记）则跳过，
+  // 防止 StrictMode 双挂载 / 切页恢复时重复入池
+  function appendMaterialText(m: { raw_text?: string | null; original_name: string }) {
+    if (!m.raw_text) return
+    const marker = `【${m.original_name}】`
+    if (ddStore.materialsText.includes(marker)) return
+    const block = `${marker}\n${m.raw_text.slice(0, 2000)}`
+    ddStore.materialsText = ddStore.materialsText
+      ? `${ddStore.materialsText}\n\n${block}`
+      : block
+    setMaterialsText(ddStore.materialsText)
+  }
+
   function handleMaterialProcessed(m: { raw_text?: string | null; original_name: string }) {
+    appendMaterialText(m)
     if (m.raw_text) {
-      setMaterialsText((prev) => prev + `\n\n【${m.original_name}】\n${m.raw_text?.slice(0, 2000) || ''}`)
       message.success(`已添加材料: ${m.original_name}`)
     } else {
       message.warning(`材料"${m.original_name}"未提取到文本（扫描件 OCR 失败或服务未启动），已跳过`)
     }
+  }
+
+  // 切页/重启后静默恢复文本池：不弹任何提示
+  function handleMaterialRestored(m: { raw_text?: string | null; original_name: string }) {
+    appendMaterialText(m)
   }
 
   return (
@@ -59,15 +158,15 @@ export function DdWorkspace() {
         <Row gutter={16}>
           <Col span={8}>
             <div className="text-sm text-gray-500 mb-1">目标公司</div>
-            <Input value={projectInfo.targetCompany} onChange={(e) => setProjectInfo({ ...projectInfo, targetCompany: e.target.value })} placeholder="如：XX科技有限公司" />
+            <Input value={projectInfo.targetCompany} onChange={(e) => updateProjectInfo({ ...projectInfo, targetCompany: e.target.value })} placeholder="如：XX科技有限公司" />
           </Col>
           <Col span={8}>
             <div className="text-sm text-gray-500 mb-1">委托方</div>
-            <Input value={projectInfo.client} onChange={(e) => setProjectInfo({ ...projectInfo, client: e.target.value })} placeholder="如：XX投资有限公司" />
+            <Input value={projectInfo.client} onChange={(e) => updateProjectInfo({ ...projectInfo, client: e.target.value })} placeholder="如：XX投资有限公司" />
           </Col>
           <Col span={8}>
             <div className="text-sm text-gray-500 mb-1">尽调范围</div>
-            <Input value={projectInfo.scope} onChange={(e) => setProjectInfo({ ...projectInfo, scope: e.target.value })} placeholder="如：股权投资、资产收购" />
+            <Input value={projectInfo.scope} onChange={(e) => updateProjectInfo({ ...projectInfo, scope: e.target.value })} placeholder="如：股权投资、资产收购" />
           </Col>
         </Row>
       </Card>
@@ -75,7 +174,7 @@ export function DdWorkspace() {
       <Row gutter={16} className="mb-4">
         <Col span={12}>
           <Card title="材料上传" size="small">
-            <FileDropZone storageKey="lawpilot:dd-upload" restoreProcessed onMaterialProcessed={handleMaterialProcessed} />
+            <FileDropZone storageKey="lawpilot:dd-upload" restoreProcessed onMaterialProcessed={handleMaterialProcessed} onMaterialRestored={handleMaterialRestored} />
           </Card>
         </Col>
         <Col span={12}>
@@ -83,7 +182,7 @@ export function DdWorkspace() {
             <TextArea
               rows={6}
               value={riskPoints}
-              onChange={(e) => setRiskPoints(e.target.value)}
+              onChange={(e) => updateRiskPoints(e.target.value)}
               placeholder="输入人工发现的风险点（每行一条），将纳入报告生成..."
             />
           </Card>
@@ -107,7 +206,14 @@ export function DdWorkspace() {
 
       {generating && (
         <div className="flex justify-center py-8">
-          <Spin tip="AI 正在生成报告..." />
+          <Spin size="large" />
+          <div className="mt-4 text-center">
+            <Text>AI 正在生成尽调报告…</Text>
+            <br />
+            <Text type="secondary" className="text-sm">
+              通常需要 1~3 分钟，可切换到其他页面，完成后回来查看
+            </Text>
+          </div>
         </div>
       )}
 
@@ -126,20 +232,9 @@ export function DdWorkspace() {
             </Button>
           }
         >
-          <div className="prose max-w-none">
-            {/* 简单 Markdown 渲染 */}
-            {report.split('\n').map((line, i) => {
-              if (line.startsWith('## '))
-                return <Title key={i} level={4} className="!mt-4">{line.replace('## ', '')}</Title>
-              if (line.startsWith('### '))
-                return <Title key={i} level={5}>{line.replace('### ', '')}</Title>
-              if (line.startsWith('- '))
-                return <div key={i} className="ml-4 text-gray-700">• {line.replace('- ', '')}</div>
-              if (line.startsWith('**') && line.endsWith('**'))
-                return <Text key={i} strong className="block mb-2">{line.replace(/\*\*/g, '')}</Text>
-              return <Paragraph key={i} className="!mb-2">{line || <br />}</Paragraph>
-            })}
-          </div>
+        <div className="max-w-none overflow-x-auto">
+          <Markdown>{report}</Markdown>
+        </div>
         </Card>
       )}
     </div>

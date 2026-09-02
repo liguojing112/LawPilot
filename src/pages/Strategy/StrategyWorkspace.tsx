@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import {
   Typography, Input, Button, Card, Row, Col, Tag, Timeline, List, Collapse, message, Spin, Empty,
 } from 'antd'
@@ -6,8 +6,9 @@ import {
   BulbOutlined, ClockCircleOutlined, FileTextOutlined,
   CheckCircleOutlined, CloseCircleOutlined, WarningOutlined, RiseOutlined,
 } from '@ant-design/icons'
+import { Markdown } from '../../components/Markdown'
 
-const { Title, Text, Paragraph } = Typography
+const { Title, Text } = Typography
 const { TextArea } = Input
 const { Panel } = Collapse
 
@@ -31,24 +32,87 @@ const IMPORTANCE_COLOR: Record<string, string> = {
   'low': 'gray',
 }
 
+const FACTS_KEY = 'lawpilot:strategy:facts'
+
+// 模块级状态：切换页面（组件卸载/重挂）后存活，
+// 避免案情被清空、进行中的推演结果丢失
+const strategyStore: {
+  facts: string
+  analyzing: boolean
+  result: StrategyResult | null
+  pending: Promise<StrategyResult> | null
+} = {
+  facts: '',
+  analyzing: false,
+  result: null,
+  pending: null,
+}
+
 export function StrategyWorkspace() {
-  const [facts, setFacts] = useState('')
-  const [analyzing, setAnalyzing] = useState(false)
-  const [result, setResult] = useState<StrategyResult | null>(null)
+  const [facts, setFacts] = useState(strategyStore.facts)
+  const [analyzing, setAnalyzing] = useState(strategyStore.analyzing)
+  const [result, setResult] = useState<StrategyResult | null>(strategyStore.result)
+
+  // 应用重启后从 localStorage 恢复案情描述
+  useEffect(() => {
+    if (strategyStore.facts) return
+    try {
+      const saved = localStorage.getItem(FACTS_KEY)
+      if (saved) {
+        strategyStore.facts = saved
+        setFacts(saved)
+      }
+    } catch { /* 忽略存储异常 */ }
+  }, [])
+
+  // 切页时推演仍在进行：重挂后订阅进行中的请求，完成后回填结果
+  useEffect(() => {
+    if (!strategyStore.pending) return
+    strategyStore.pending
+      .then((res) => {
+        setResult(res)
+        setAnalyzing(false)
+      })
+      .catch(() => setAnalyzing(false))
+  }, [])
+
+  function updateFacts(v: string) {
+    strategyStore.facts = v
+    setFacts(v)
+    try {
+      localStorage.setItem(FACTS_KEY, v)
+    } catch { /* 忽略存储异常 */ }
+  }
 
   async function handleAnalyze() {
     if (!facts.trim() || facts.trim().length < 20) {
       message.warning('请输入至少 20 字的案情描述')
       return
     }
+    strategyStore.analyzing = true
+    strategyStore.result = null
     setAnalyzing(true)
     setResult(null)
+    const pending = window.api.ai.swotAnalysis(facts.trim())
+      .then((res) => {
+        const r = res as StrategyResult
+        strategyStore.result = r
+        strategyStore.pending = null
+        return r
+      })
+      .catch((err) => {
+        strategyStore.analyzing = false
+        strategyStore.pending = null
+        throw err
+      })
+    strategyStore.pending = pending
     try {
-      const res = await window.api.ai.swotAnalysis(facts.trim())
-      setResult(res as StrategyResult)
+      const res = await pending
+      setResult(res)
     } catch (err) {
       message.error(`分析失败: ${(err as Error).message}`)
     } finally {
+      strategyStore.analyzing = false
       setAnalyzing(false)
     }
   }
@@ -64,7 +128,7 @@ export function StrategyWorkspace() {
         <TextArea
           rows={8}
           value={facts}
-          onChange={(e) => setFacts(e.target.value)}
+          onChange={(e) => updateFacts(e.target.value)}
           placeholder={'请详细描述案件事实，包括:\n- 当事人信息\n- 事件经过（含日期）\n- 争议焦点\n- 已有证据\n- 对方主张\n\n示例: 甲于2024年3月1日借给乙10万元，约定月利率1%，还款期2024年9月1日。乙逾期未还，甲持银行转账记录和书面借条起诉...'}
         />
         <div className="mt-4 flex items-center justify-between">
@@ -222,12 +286,12 @@ export function StrategyWorkspace() {
             </Col>
           </Row>
 
-          {/* 综合分析 */}
-          {result.analysis && (
-            <Card title="综合分析" className="mb-4">
-              <Paragraph className="whitespace-pre-wrap">{result.analysis}</Paragraph>
-            </Card>
-          )}
+           {/* 综合分析 */}
+           {result.analysis && (
+             <Card title="综合分析" className="mb-4">
+               <Markdown>{result.analysis}</Markdown>
+             </Card>
+           )}
 
           {/* 应对建议 */}
           {result.suggestions && result.suggestions.length > 0 && (

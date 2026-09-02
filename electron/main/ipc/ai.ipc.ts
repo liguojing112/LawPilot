@@ -139,6 +139,7 @@ export function registerAiIpc(): void {
         }
 
         const d = typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : {}
+        // 尽调报告生成耗时长（实测 2 分钟+），单独放宽超时
         const result = await pythonBridge.post<{
           content: string
           usage?: { prompt_tokens: number; completion_tokens: number }
@@ -150,7 +151,7 @@ export function registerAiIpc(): void {
           target_company: d.target_company || '',
           client: d.client || '',
           scope: d.scope || '',
-        })
+        }, 300_000)
 
         try {
           createUsageLog(
@@ -232,17 +233,34 @@ export function registerAiIpc(): void {
     try {
       const status = await pythonBridge.getStatus()
       if (!status.running) {
-        return { doc_count: 0, ok: false, error: 'Python 服务未启动' }
+        return { started: false, ok: false, error: 'Python 服务未启动' }
       }
-      // 全量重建索引是同步长任务，设置较长超时
+      // 后端在后台线程执行重建，立即返回；进度走 KNOWLEDGE_REBUILD_PROGRESS 轮询
       return await pythonBridge.post<{
-        doc_count: number
-        law_count: number
-        material_count: number
-        message: string
+        started: boolean
+        status: string
       }>('/knowledge/rebuild', {})
     } catch (err) {
-      return { doc_count: 0, ok: false, error: (err as Error).message }
+      return { started: false, ok: false, error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.KNOWLEDGE_REBUILD_PROGRESS, async () => {
+    try {
+      const status = await pythonBridge.getStatus()
+      if (!status.running) {
+        return { status: 'idle' as const, done: 0, total: 0, current: '', error: 'Python 服务未启动', result: null }
+      }
+      return await pythonBridge.get<{
+        status: 'idle' | 'running' | 'done' | 'error'
+        done: number
+        total: number
+        current: string
+        error: string | null
+        result: { doc_count: number; law_count: number; material_count: number; message: string } | null
+      }>('/knowledge/rebuild-progress')
+    } catch (err) {
+      return { status: 'error' as const, done: 0, total: 0, current: '', error: (err as Error).message, result: null }
     }
   })
 

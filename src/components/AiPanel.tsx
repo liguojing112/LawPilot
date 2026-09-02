@@ -14,6 +14,7 @@ import {
   ReloadOutlined,
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
+import { Markdown } from './Markdown'
 import type { ChatMessage, ConversationRow, RagResult } from '../../shared/types'
 
 const { Text } = Typography
@@ -544,7 +545,13 @@ export function AiPanel({ open, onClose }: AiPanelProps) {
                         lineHeight: 1.7,
                       }}
                     >
-                      {m.content || (m.role === 'assistant' && streaming ? '' : '（空）')}
+                      {m.role === 'assistant' && !streaming && m.content ? (
+                        <div style={{ whiteSpace: 'normal' }}>
+                          <Markdown>{m.content}</Markdown>
+                        </div>
+                      ) : (
+                        m.content || (m.role === 'assistant' && streaming ? '' : '（空）')
+                      )}
                     </div>
                   )}
                   {m.role === 'assistant' && !streaming && m.content && editingIdx !== i && (

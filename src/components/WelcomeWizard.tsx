@@ -116,7 +116,7 @@ export function WelcomeWizard({ onComplete }: Props) {
     try {
       const status = await window.api.system.pythonStatus()
       if (!status.running) {
-        message.error('Python 服务未启动，请先运行 npm run python:dev')
+        message.error('本地服务尚未就绪，请稍候几秒后重试（启动过程中属正常现象）')
         setTestOk(false)
         return
       }
