@@ -1,17 +1,21 @@
 """知识库管理路由 — 索引构建/状态/搜索"""
+import threading
+
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.services.embedding_service import rebuild_index, get_index_status, search_similar
+from app.services.embedding_service import rebuild_index, get_index_status, search_similar, get_rebuild_state
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
 
 class RebuildResponse(BaseModel):
-    doc_count: int = 0
-    law_count: int = 0
-    material_count: int = 0
-    message: str = ""
+    started: bool = False
+    status: str = "idle"
+    done: int = 0
+    total: int = 0
+    current: str = ""
+    error: str | None = None
 
 
 class StatusResponse(BaseModel):
@@ -37,12 +41,26 @@ class SearchResultItem(BaseModel):
 
 @router.post("/rebuild", response_model=RebuildResponse)
 async def rebuild():
-    """全量重建向量索引"""
-    try:
-        result = rebuild_index()
-        return RebuildResponse(**result)
-    except Exception as e:
-        return RebuildResponse(message=str(e))
+    """全量重建向量索引（后台线程执行，立即返回，进度走 /rebuild-progress）"""
+    st = get_rebuild_state()
+    if st["status"] == "running":
+        return RebuildResponse(started=False, **{k: st[k] for k in ("status", "done", "total", "current", "error")})
+
+    def _run():
+        try:
+            rebuild_index()
+        except Exception:
+            # rebuild_index 内部已把状态置为 error 并抛出，这里仅吞掉避免线程异常打印
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return RebuildResponse(started=True, status="running")
+
+
+@router.get("/rebuild-progress")
+async def rebuild_progress():
+    """轮询重建进度"""
+    return get_rebuild_state()
 
 
 @router.get("/status", response_model=StatusResponse)

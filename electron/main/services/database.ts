@@ -1,10 +1,17 @@
 import Database from 'better-sqlite3'
 import { app } from 'electron'
 import { join, dirname } from 'path'
-import { mkdirSync, existsSync } from 'fs'
+import { mkdirSync, existsSync, renameSync, unlinkSync } from 'fs'
 import { v4 as uuidv4 } from 'uuid'
 
 let db: Database.Database | null = null
+
+/** 最近一次数据库修复事件（供 UI 展示），为 null 表示未发生 */
+let lastRepairEvent: { at: string; backupPath: string; reason: string } | null = null
+
+export function getDatabaseRepairEvent(): { at: string; backupPath: string; reason: string } | null {
+  return lastRepairEvent
+}
 
 /** 获取或初始化数据库实例 */
 export function getDatabase(): Database.Database {
@@ -19,12 +26,47 @@ export function getDatabase(): Database.Database {
     mkdirSync(lawpilotDir, { recursive: true })
   }
 
-  db = new Database(dbPath)
+  db = openWithRepair(dbPath)
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
 
   initializeSchema(db)
   return db
+}
+
+/**
+ * 打开数据库并校验完整性。
+ * 打开失败或 quick_check 不通过时：把损坏文件改名备份（含 WAL/SHM），
+ * 新建空库，保证应用可启动；数据留在备份文件中可人工恢复。
+ */
+function openWithRepair(dbPath: string): Database.Database {
+  let candidate: Database.Database | null = null
+  try {
+    candidate = new Database(dbPath)
+    const rows = candidate.prepare('PRAGMA quick_check').all() as Array<Record<string, string>>
+    const healthy = rows.length === 1 && rows[0].ok === 'ok'
+    if (healthy) return candidate
+    throw new Error(`quick_check 失败: ${rows.slice(0, 3).map((r) => Object.values(r).join(' ')).join('; ')}`)
+  } catch (err) {
+    try { candidate?.close() } catch { /* 忽略 */ }
+    const reason = (err as Error).message
+    const backupPath = `${dbPath}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`
+    try {
+      for (const suffix of ['-wal', '-shm']) {
+        const extra = dbPath + suffix
+        if (existsSync(extra)) {
+          try { renameSync(extra, backupPath + suffix) } catch { /* 忽略 */ }
+        }
+      }
+      renameSync(dbPath, backupPath)
+      console.error(`[Database] 数据库损坏，已备份到 ${backupPath} 并重建空库。原因: ${reason}`)
+    } catch (backupErr) {
+      console.error('[Database] 数据库损坏且备份失败，删除后重建:', backupErr)
+      try { unlinkSync(dbPath) } catch { /* 忽略 */ }
+    }
+    lastRepairEvent = { at: new Date().toISOString(), backupPath, reason }
+    return new Database(dbPath)
+  }
 }
 
 /** 关闭数据库连接 */

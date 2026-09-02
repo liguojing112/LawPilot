@@ -31,35 +31,29 @@ _lancedb_table = None
 def _get_db_path() -> str:
     """查找 SQLite 数据库路径（与 llm.py 保持一致，避免递归遍历 home 目录）"""
     candidates = [
+        # 生产模式：Electron 注入 LAWPILOT_DATA_DIR（= userData/LawPilot）
+        os.path.join(os.getenv("LAWPILOT_DATA_DIR", ""), "lawpilot.db"),
         os.path.join(os.getenv("APPDATA", ""), "lawpilot", "LawPilot", "lawpilot.db"),
         os.path.join(os.getenv("APPDATA", ""), "LawPilot", "lawpilot.db"),
         os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "LawPilot", "lawpilot.db"),
     ]
     for candidate in candidates:
-        if os.path.exists(candidate):
+        if candidate and os.path.exists(candidate):
             return candidate
     return ""
 
 
 def _get_model():
-    """懒加载 BGE 嵌入模型"""
+    """懒加载 BGE 嵌入模型（本地缓存优先，路径由 config.MODEL_CACHE_DIR 决定）"""
     global _embedding_model
     if _embedding_model is None:
         try:
             from sentence_transformers import SentenceTransformer
+            from app.config import MODEL_CACHE_DIR
 
-            # 优先使用本地模型（ModelScope 下载）
-            local_model_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                "data", "models", "models", "BAAI--bge-small-zh-v1.5", "snapshots", "master"
-            )
-
-            if os.path.exists(local_model_path):
-                _embedding_model = SentenceTransformer(local_model_path)
-            else:
-                _embedding_model = SentenceTransformer(
-                    "BAAI/bge-small-zh-v1.5",
-                    cache_folder=os.path.join(os.path.dirname(VECTOR_DIR), "models"),
+            _embedding_model = SentenceTransformer(
+                "BAAI/bge-small-zh-v1.5",
+                cache_folder=MODEL_CACHE_DIR,
             )
         except Exception as e:
             raise RuntimeError(f"无法加载嵌入模型: {e}") from e
@@ -70,25 +64,19 @@ def _get_reranker():
     """懒加载 BGE Cross-Encoder 重排模型（精排阶段，联合打分 query↔doc）
 
     bge-reranker-base 约 2.8 亿参数 / 1.1GB，本地单机的质量-速度最优点。
-    首次调用需下载；加载失败时由调用方捕获并回退到向量+关键词排序。
+    模型随安装包内置（config.MODEL_CACHE_DIR）；加载失败时由调用方捕获并
+    回退到向量+关键词排序。
     """
     global _reranker_model
     if _reranker_model is None:
         from sentence_transformers import CrossEncoder
+        from app.config import MODEL_CACHE_DIR
 
-        # 优先本地模型（ModelScope 下载，目录结构与 embedding 模型一致）
-        local_model_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-            "data", "models", "models", "BAAI--bge-reranker-base", "snapshots", "master"
+        _reranker_model = CrossEncoder(
+            "BAAI/bge-reranker-base",
+            max_length=512,
+            cache_folder=MODEL_CACHE_DIR,
         )
-        if os.path.exists(local_model_path):
-            _reranker_model = CrossEncoder(local_model_path, max_length=512)
-        else:
-            _reranker_model = CrossEncoder(
-                "BAAI/bge-reranker-base",
-                max_length=512,
-                cache_folder=os.path.join(os.path.dirname(VECTOR_DIR), "models"),
-            )
     return _reranker_model
 
 
@@ -295,90 +283,121 @@ def _fetch_materials() -> list[dict]:
     return results
 
 
+# 重建进度状态（供 /knowledge/rebuild-progress 轮询）
+_rebuild_state: dict = {
+    "status": "idle",   # idle | running | done | error
+    "done": 0,
+    "total": 0,
+    "current": "",
+    "error": None,
+    "result": None,
+}
+
+
+def get_rebuild_state() -> dict:
+    return dict(_rebuild_state)
+
+
 def rebuild_index() -> dict:
-    """全量重建向量索引"""
-    table = _get_table()
-    model = _get_model()
-
-    # 收集所有数据源
-    data_sources = _fetch_law_articles() + _fetch_materials()
-    if not data_sources:
-        return {"doc_count": 0, "message": "没有可索引的数据"}
-
-    # 同一文件重复上传会产生 id 不同但内容相同的块，按文本去重只索引一份
-    _seen_text: set[str] = set()
-    unique_sources = []
-    for d in data_sources:
-        tk = hashlib.md5(d["text"].strip().encode("utf-8")).hexdigest()
-        if tk in _seen_text:
-            continue
-        _seen_text.add(tk)
-        unique_sources.append(d)
-    data_sources = unique_sources
-
-    # 批量生成向量
-    texts = [d["text"] for d in data_sources]
-    embeddings = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
-
-    # 构建记录
-    import time
-
-    now = time.time()
-    records = []
-    for i, ds in enumerate(data_sources):
-        records.append(
-            {
-                "id": ds["id"],
-                "vector": embeddings[i].tolist(),
-                "text": ds["text"],
-                "source_type": ds["source_type"],
-                "source_id": ds["source_id"],
-                "title": ds["title"],
-                "law_id": ds["law_id"] or "",
-                "article_id": ds["article_id"] or "",
-                "created_at": now,
-            }
-        )
-
-    # 写入 LanceDB
-    # 如果是已有数据，先删除旧表再重建
+    """全量重建向量索引（进度写入 _rebuild_state，可被后台线程调用）"""
+    global _rebuild_state
+    _rebuild_state = {"status": "running", "done": 0, "total": 0, "current": "正在收集数据…", "error": None, "result": None}
     try:
-        import lancedb
+        table = _get_table()
+        model = _get_model()
 
-        db = lancedb.connect(VECTOR_DIR)
-        if "knowledge_base" in db.table_names():
-            db.drop_table("knowledge_base")
+        # 收集所有数据源
+        data_sources = _fetch_law_articles() + _fetch_materials()
+        if not data_sources:
+            _rebuild_state.update(status="done", current="完成", result={"doc_count": 0, "message": "没有可索引的数据"})
+            return {"doc_count": 0, "message": "没有可索引的数据"}
 
-        import pyarrow as pa
+        # 同一文件重复上传会产生 id 不同但内容相同的块，按文本去重只索引一份
+        _seen_text: set[str] = set()
+        unique_sources = []
+        for d in data_sources:
+            tk = hashlib.md5(d["text"].strip().encode("utf-8")).hexdigest()
+            if tk in _seen_text:
+                continue
+            _seen_text.add(tk)
+            unique_sources.append(d)
+        data_sources = unique_sources
 
-        schema = pa.schema(
-            [
-                pa.field("id", pa.string()),
-                pa.field("vector", pa.list_(pa.float32(), 512)),
-                pa.field("text", pa.string()),
-                pa.field("source_type", pa.string()),
-                pa.field("source_id", pa.string()),
-                pa.field("title", pa.string()),
-                pa.field("law_id", pa.string()),
-                pa.field("article_id", pa.string()),
-                pa.field("created_at", pa.float64()),
-            ]
-        )
-        new_table = db.create_table("knowledge_base", schema=schema)
-        new_table.add(records)
+        # 分块生成向量，报告进度
+        _rebuild_state.update(total=len(data_sources), current="正在生成向量…")
+        texts = [d["text"] for d in data_sources]
+        embeddings_list = []
+        batch_size = 64
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            embeddings_list.extend(model.encode(batch, normalize_embeddings=True, show_progress_bar=False))
+            _rebuild_state["done"] = min(i + len(batch), len(texts))
 
-        global _lancedb_table
-        _lancedb_table = new_table
-    except Exception:
-        # Fallback: 直接 add
-        table.add(records)
+        # 构建记录
+        import time
 
-    return {
-        "doc_count": len(records),
-        "law_count": len([d for d in data_sources if d["source_type"] == "law"]),
-        "material_count": len([d for d in data_sources if d["source_type"] == "material"]),
-        "message": "索引重建完成",
-    }
+        now = time.time()
+        _rebuild_state["current"] = "正在写入索引…"
+        records = []
+        for i, ds in enumerate(data_sources):
+            records.append(
+                {
+                    "id": ds["id"],
+                    "vector": embeddings_list[i].tolist(),
+                    "text": ds["text"],
+                    "source_type": ds["source_type"],
+                    "source_id": ds["source_id"],
+                    "title": ds["title"],
+                    "law_id": ds["law_id"] or "",
+                    "article_id": ds["article_id"] or "",
+                    "created_at": now,
+                }
+            )
+
+        # 写入 LanceDB
+        # 如果是已有数据，先删除旧表再重建
+        try:
+            import lancedb
+
+            db = lancedb.connect(VECTOR_DIR)
+            if "knowledge_base" in db.table_names():
+                db.drop_table("knowledge_base")
+
+            import pyarrow as pa
+
+            schema = pa.schema(
+                [
+                    pa.field("id", pa.string()),
+                    pa.field("vector", pa.list_(pa.float32(), 512)),
+                    pa.field("text", pa.string()),
+                    pa.field("source_type", pa.string()),
+                    pa.field("source_id", pa.string()),
+                    pa.field("title", pa.string()),
+                    pa.field("law_id", pa.string()),
+                    pa.field("article_id", pa.string()),
+                    pa.field("created_at", pa.float64()),
+                ]
+            )
+            new_table = db.create_table("knowledge_base", schema=schema)
+            new_table.add(records)
+
+            global _lancedb_table
+            _lancedb_table = new_table
+        except Exception:
+            # Fallback: 直接 add
+            table.add(records)
+
+        result = {
+            "doc_count": len(records),
+            "law_count": len([d for d in data_sources if d["source_type"] == "law"]),
+            "material_count": len([d for d in data_sources if d["source_type"] == "material"]),
+            "message": "索引重建完成",
+        }
+        _rebuild_state.update(status="done", done=_rebuild_state["total"], current="完成", result=result)
+        return result
+    except Exception as e:
+        _rebuild_state.update(status="error", error=str(e))
+        raise
 
 
 def search_similar(query: str, top_k: int = 10) -> list[SearchResult]:

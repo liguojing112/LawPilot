@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron'
 import { IPC_CHANNELS, type PythonStatus } from '../../../shared/types'
 import { pythonBridge } from '../services/python-bridge'
-import { getDatabaseStatus, getConfigValue, setConfigValue } from '../services/database'
+import { getDatabaseStatus, getConfigValue, setConfigValue, getDatabaseRepairEvent } from '../services/database'
 
 export function registerSystemIpc(): void {
   ipcMain.handle(IPC_CHANNELS.SYSTEM_PING, () => {
@@ -14,6 +14,10 @@ export function registerSystemIpc(): void {
 
   ipcMain.handle(IPC_CHANNELS.DB_STATUS, () => {
     return getDatabaseStatus()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.DB_REPAIR_EVENT, () => {
+    return getDatabaseRepairEvent()
   })
 
   ipcMain.handle(IPC_CHANNELS.SYSTEM_GET_CONFIG, (_event, key: string) => {

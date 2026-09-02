@@ -13,6 +13,7 @@ export const IPC_CHANNELS = {
 
   // 系统
   DB_STATUS: 'db:status',
+  DB_REPAIR_EVENT: 'db:repair-event',
 
   // 法规
   LAW_SEARCH: 'law:search',
@@ -58,6 +59,7 @@ export const IPC_CHANNELS = {
   // 知识库
   KNOWLEDGE_STATUS: 'knowledge:status',
   KNOWLEDGE_REBUILD: 'knowledge:rebuild',
+  KNOWLEDGE_REBUILD_PROGRESS: 'knowledge:rebuild-progress',
 
   // 文件
   FILE_SELECT: 'file:select',
@@ -323,10 +325,23 @@ export interface KnowledgeStatus {
 
 export interface KnowledgeRebuildResult {
   ok?: boolean
-  doc_count: number
+  started?: boolean
+  status?: string
+  error?: string | null
+  doc_count?: number
   law_count?: number
   material_count?: number
-  message: string
+  message?: string
+}
+
+/** 向量重建进度（后台线程执行，前端轮询） */
+export interface KnowledgeRebuildProgress {
+  status: 'idle' | 'running' | 'done' | 'error'
+  done: number
+  total: number
+  current: string
+  error: string | null
+  result: { doc_count: number; law_count: number; material_count: number; message: string } | null
 }
 
 export interface SWOTResult {
@@ -363,6 +378,7 @@ export interface LawPilotAPI {
   system: {
     ping(): Promise<string>
     dbStatus(): Promise<DbStatus>
+    dbRepairEvent(): Promise<{ at: string; backupPath: string; reason: string } | null>
     getConfig(key: string): Promise<string>
     setConfig(key: string, value: string): Promise<void>
     pythonStatus(): Promise<PythonStatus>
@@ -420,6 +436,7 @@ export interface LawPilotAPI {
   knowledge: {
     status(): Promise<KnowledgeStatus>
     rebuild(): Promise<KnowledgeRebuildResult>
+    rebuildProgress(): Promise<KnowledgeRebuildProgress>
   }
   file: {
     select(options?: { filters?: { name: string; extensions: string[] }[] }): Promise<string[] | null>

@@ -1,12 +1,12 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
-  Card, Form, Input, Button, Typography, Switch, Select, Divider, message, Tag, Space, Alert, Spin,
+  Card, Form, Input, Button, Typography, Switch, Select, Divider, message, Tag, Space, Alert, Spin, Progress,
 } from 'antd'
 import {
   SettingOutlined, ApiOutlined, CheckCircleOutlined, CloseCircleOutlined, InfoCircleOutlined,
   DatabaseOutlined,
 } from '@ant-design/icons'
-import type { KnowledgeStatus, KnowledgeRebuildResult } from '../../../shared/types'
+import type { KnowledgeStatus, KnowledgeRebuildResult, KnowledgeRebuildProgress } from '../../../shared/types'
 
 const { Title, Text } = Typography
 
@@ -51,6 +51,8 @@ export function SettingsPage() {
   const [kbStatus, setKbStatus] = useState<KnowledgeStatus | null>(null)
   const [kbLoading, setKbLoading] = useState(false)
   const [kbRebuilding, setKbRebuilding] = useState(false)
+  const [kbProgress, setKbProgress] = useState<KnowledgeRebuildProgress | null>(null)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const isCustom = selectedModel === '__custom__'
   const providerInfo = PROVIDER_CONFIG[selectedModel] || null
@@ -64,6 +66,10 @@ export function SettingsPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // 卸载时停止进度轮询
+  useEffect(() => () => stopPolling(), [])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+
   async function loadKnowledgeStatus() {
     setKbLoading(true)
     try {
@@ -75,21 +81,54 @@ export function SettingsPage() {
     }
   }
 
+  function stopPolling() {
+    if (pollRef.current) {
+      clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+  }
+
+  function startPolling() {
+    stopPolling()
+    pollRef.current = setInterval(async () => {
+      try {
+        const p: KnowledgeRebuildProgress = await window.api.knowledge.rebuildProgress()
+        setKbProgress(p)
+        if (p.status === 'done') {
+          stopPolling()
+          setKbRebuilding(false)
+          message.success(p.result?.message || `索引重建完成（${p.result?.doc_count ?? 0} 个文档）`)
+          loadKnowledgeStatus()
+        } else if (p.status === 'error') {
+          stopPolling()
+          setKbRebuilding(false)
+          message.error(p.error || '索引重建失败')
+        }
+      } catch {
+        // 单次轮询失败忽略，下一轮重试
+      }
+    }, 1500)
+  }
+
   async function handleKbRebuild() {
     setKbRebuilding(true)
-    message.info('索引构建中，可能需要数分钟…')
+    setKbProgress({ status: 'running', done: 0, total: 0, current: '正在启动…', error: null, result: null })
     try {
       const res: KnowledgeRebuildResult = await window.api.knowledge.rebuild()
-      if (res.ok !== false) {
-        message.success(res.message || `索引重建完成（${res.doc_count} 个文档）`)
-      } else {
-        message.error(res.message || '索引重建失败')
+      if (res.ok === false || res.started === false) {
+        if (res.status === 'running') {
+          message.info('索引正在重建中…')
+          startPolling()
+        } else {
+          setKbRebuilding(false)
+          message.error(res.error || res.message || '索引重建失败')
+        }
+        return
       }
-      loadKnowledgeStatus()
+      startPolling()
     } catch (err) {
-      message.error(`索引重建失败: ${(err as Error).message}`)
-    } finally {
       setKbRebuilding(false)
+      message.error(`索引重建失败: ${(err as Error).message}`)
     }
   }
 
@@ -412,9 +451,21 @@ export function SettingsPage() {
         </div>
         <div style={{ marginTop: 8 }}>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            重建会全量重新向量化法规与案件材料，耗时较长（视数据量数分钟），期间 AI 面板的「知识库问答」会基于旧索引。
+            重建会全量重新向量化法规与案件材料，耗时较长（视数据量数分钟），期间 AI 面板的「知识库问答」会基于旧索引。可切换到其他页面，后台继续执行。
           </Text>
         </div>
+        {kbProgress && kbProgress.status === 'running' && (
+          <div style={{ marginTop: 12 }}>
+            <Progress
+              percent={kbProgress.total > 0 ? Math.round((kbProgress.done / kbProgress.total) * 100) : 0}
+              status="active"
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {kbProgress.current}
+              {kbProgress.total > 0 ? `（${kbProgress.done}/${kbProgress.total}）` : ''}
+            </Text>
+          </div>
+        )}
       </Card>
 
       <Divider />

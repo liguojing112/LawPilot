@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Card, Button, Tag, Row, Col, Typography, Space, Divider, Statistic, Popconfirm, message, Segmented } from 'antd'
+import { Card, Button, Tag, Row, Col, Typography, Space, Divider, Statistic, Popconfirm, message, Segmented, Alert } from 'antd'
 import {
   FileTextOutlined,
   FolderOpenOutlined,
@@ -28,6 +28,7 @@ export function Dashboard() {
   const [loading, setLoading] = useState(false)
   const [aiPeriod, setAiPeriod] = useState<'today' | 'week' | 'month'>('today')
   const [aiUsage, setAiUsage] = useState<UsageStats | null>(null)
+  const [dbRepair, setDbRepair] = useState<{ at: string; backupPath: string; reason: string } | null>(null)
 
   const initRef = useRef(false)
 
@@ -48,6 +49,7 @@ export function Dashboard() {
       }
       checkPythonStatus()
       checkDbStatus()
+      checkDbRepair()
       loadRecentMaterials()
     }
 
@@ -101,6 +103,15 @@ export function Dashboard() {
       setDbStatus(status)
     } catch {
       // 数据库可能尚未初始化
+    }
+  }
+
+  async function checkDbRepair() {
+    try {
+      const ev = await window.api.system.dbRepairEvent()
+      setDbRepair(ev)
+    } catch {
+      // 忽略
     }
   }
 
@@ -299,6 +310,21 @@ export function Dashboard() {
       </Row>
 
       <Divider />
+
+      {dbRepair && (
+        <Alert
+          type="warning"
+          showIcon
+          className="mb-4"
+          message="检测到本地数据库损坏，已自动重建"
+          description={
+            <div className="text-xs">
+              <div>损坏文件已备份，原数据未丢失，可联系技术支持恢复：</div>
+              <div className="mt-1 break-all font-mono">{dbRepair.backupPath}</div>
+            </div>
+          }
+        />
+      )}
 
       {/* 系统状态 */}
       <Title level={4} className="!mb-4">

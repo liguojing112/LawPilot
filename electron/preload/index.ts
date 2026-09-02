@@ -12,6 +12,7 @@ const api: LawPilotAPI = {
   system: {
     ping: () => ipcRenderer.invoke(IPC_CHANNELS.SYSTEM_PING),
     dbStatus: () => ipcRenderer.invoke(IPC_CHANNELS.DB_STATUS),
+    dbRepairEvent: () => ipcRenderer.invoke(IPC_CHANNELS.DB_REPAIR_EVENT),
     getConfig: (key: string) => ipcRenderer.invoke(IPC_CHANNELS.SYSTEM_GET_CONFIG, key),
     setConfig: (key: string, value: string) =>
       ipcRenderer.invoke(IPC_CHANNELS.SYSTEM_SET_CONFIG, key, value),
@@ -120,6 +121,7 @@ const api: LawPilotAPI = {
   knowledge: {
     status: () => ipcRenderer.invoke(IPC_CHANNELS.KNOWLEDGE_STATUS),
     rebuild: () => ipcRenderer.invoke(IPC_CHANNELS.KNOWLEDGE_REBUILD),
+    rebuildProgress: () => ipcRenderer.invoke(IPC_CHANNELS.KNOWLEDGE_REBUILD_PROGRESS),
   },
 
   file: {
