@@ -29,6 +29,7 @@ win:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
+  artifactName: LawPilotSetup${version}.exe
   installerIcon: resources/icons/icon.ico
   uninstallerIcon: resources/icons/icon.ico
   installerHeaderIcon: resources/icons/icon.ico
@@ -41,9 +42,12 @@ portable:
   artifactName: LawPilot-portable-${version}.${ext}
 
 extraResources:
-  - from: python/
+  # 内嵌 Python 运行时（解释器 + CPU 版依赖 + 内置模型 + 应用源码）
+  # 安装后位于 resources/python/，python-bridge 生产分支直接找 python.exe
+  - from: python-dist/
     to: python/
     filter:
       - "**/*"
-      - "!__pycache__/**"
-      - "!*.pyc"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
+      - "!**/*.pyd.old"

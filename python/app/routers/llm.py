@@ -52,12 +52,15 @@ class ExtractEntitiesRequest(BaseModel):
 def _find_db_path() -> str:
     # 优先查已知路径，避免 glob 递归踩到系统目录报错
     for candidate in [
+        # 生产模式：Electron 注入 LAWPILOT_DATA_DIR（= userData/LawPilot）
+        os.path.join(os.getenv("LAWPILOT_DATA_DIR", ""), "lawpilot.db"),
         os.path.join(os.getenv("APPDATA", ""), "lawpilot", "LawPilot", "lawpilot.db"),
         os.path.join(os.getenv("APPDATA", ""), "LawPilot", "lawpilot.db"),
         os.path.join(str(Path.home()), "AppData", "Roaming", "LawPilot", "lawpilot.db"),
     ]:
-        if os.path.exists(candidate):
+        if candidate and os.path.exists(candidate):
             return candidate
+    # 默认（开发模式）路径
     return os.path.join(os.getenv("APPDATA", ""), "lawpilot", "LawPilot", "lawpilot.db")
 
 

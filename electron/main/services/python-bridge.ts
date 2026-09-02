@@ -1,5 +1,6 @@
 import { app } from 'electron'
 import { join } from 'path'
+import { mkdirSync } from 'fs'
 import { ChildProcess, spawn } from 'child_process'
 import { PythonStatus } from '../../../shared/types'
 
@@ -61,6 +62,26 @@ class PythonBridge {
     }
   }
 
+  /** 构造子进程环境：生产模式下把可写数据指向用户目录，模型指向安装包内置目录 */
+  private buildEnv(): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      LAWPILOT_PYTHON_PORT: String(this.port),
+    }
+    if (!app.isPackaged) return env
+
+    const userDir = join(app.getPath('userData'), 'LawPilot')
+    try { mkdirSync(userDir, { recursive: true }) } catch { /* 忽略 */ }
+    env.LAWPILOT_DATA_DIR = userDir
+    // 内嵌运行时随包位于 resources/python/，模型在其 data/ 下
+    env.LAWPILOT_MODEL_DIR = join(process.resourcesPath, 'python', 'data', 'models')
+    env.PADDLEX_HOME = join(process.resourcesPath, 'python', 'data', 'paddlex')
+    // 模型已内置，禁止 HuggingFace 联网检查（离线可用）
+    env.HF_HUB_OFFLINE = '1'
+    env.TRANSFORMERS_OFFLINE = '1'
+    return env
+  }
+
   /** 启动 Python 子进程 */
   async start(): Promise<void> {
     const info = this.getExecutableInfo()
@@ -78,7 +99,7 @@ class PythonBridge {
     this.process = spawn(info.exe, info.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       cwd: info.cwd,
-      env: { ...process.env, LAWPILOT_PYTHON_PORT: String(this.port) },
+      env: this.buildEnv(),
     })
 
     this.process.stdout?.on('data', (data: Buffer) => {
