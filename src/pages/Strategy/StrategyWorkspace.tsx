@@ -79,7 +79,14 @@ export function StrategyWorkspace() {
 
       {analyzing && (
         <div className="flex justify-center py-8">
-          <Spin tip="AI 正在推演分析..." />
+          <Spin size="large" />
+          <div className="mt-4 text-center">
+            <Text>AI 正在推演分析，正在检索法条并生成 SWOT 矩阵…</Text>
+            <br />
+            <Text type="secondary" className="text-sm">
+              通常需要 1~2 分钟，请勿关闭页面
+            </Text>
+          </div>
         </div>
       )}
 

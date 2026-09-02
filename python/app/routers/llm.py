@@ -312,11 +312,13 @@ async def strategy_endpoint(req: StrategyRequest):
     if not req.facts_text.strip():
         return {"error": "请输入案情描述"}
 
-    # 检索法条（使用新 RAG 引擎）
+    # 检索法条（使用新 RAG 引擎）— run_in_executor 避免阻塞事件循环
+    import asyncio
     from app.services.rag_engine import hybrid_search
     related_laws = []
     try:
-        related_laws = hybrid_search(req.facts_text, top_k=5)
+        loop = asyncio.get_event_loop()
+        related_laws = await loop.run_in_executor(None, lambda: hybrid_search(req.facts_text, top_k=5))
     except Exception:
         pass
     laws_text = "\n".join(

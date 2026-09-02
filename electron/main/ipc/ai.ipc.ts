@@ -180,9 +180,10 @@ export function registerAiIpc(): void {
         }
       }
 
+      // 策略推演一次性生成大量 JSON 字段，LLM 耗时长（实测 ~100s），单独放宽超时
       const result = await pythonBridge.post<Record<string, unknown>>('/llm/strategy', {
         facts_text: facts,
-      })
+      }, 300_000)
 
       const usage = result.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined
       try {

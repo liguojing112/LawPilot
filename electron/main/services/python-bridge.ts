@@ -196,16 +196,28 @@ class PythonBridge {
   }
 
   /** 通用 POST */
-  async post<T>(endpoint: string, body: unknown): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${endpoint}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    if (!response.ok) {
-      throw new Error(`Python service error: ${response.status} ${response.statusText}`)
+  async post<T>(endpoint: string, body: unknown, timeoutMs = 120_000): Promise<T> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      log.info(`POST ${endpoint} (timeout=${timeoutMs}ms)`)
+      const response = await fetch(`${this.baseUrl}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      })
+      clearTimeout(timer)
+      if (!response.ok) {
+        const text = await response.text().catch(() => '')
+        throw new Error(`Python service error: ${response.status} ${response.statusText} ${text}`)
+      }
+      return response.json() as Promise<T>
+    } catch (err) {
+      clearTimeout(timer)
+      log.error(`POST ${endpoint} failed:`, (err as Error).message)
+      throw err
     }
-    return response.json() as Promise<T>
   }
 
   /** 通用 GET */
