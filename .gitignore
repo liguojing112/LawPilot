@@ -3,6 +3,8 @@ out/
 dist/
 debug-win-unpacked/
 python-dist/
+交付包/
+*.zip
 __pycache__/
 *.pyc
 *.pyo
@@ -16,3 +18,6 @@ python/models/*
 !python/models/.gitkeep
 python/data/
 *.lock.db
+
+debug-win-unpacked/
+
